@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["cogware-bcm2837"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+repository = "https://codeberg.org/Cogware/cogware-bcm2837"
+
+# ---------------------------------------------------------------------------
+# Profiles live in the workspace root: Cargo ignores `[profile]` tables in
+# member manifests.
+#
+# Both profiles keep full DWARF and unwind tables so JTAG (OpenOCD +
+# aarch64-none-elf-gdb) can resolve symbols and backtraces against the ELF;
+# the SoC itself runs the stripped-by-objcopy `kernel8.img`.
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+panic = "abort"
+opt-level = 1        # opt-level 0 produces a multi-megabyte image; 1 stays debuggable
+debug = "full"
+strip = "none"
+overflow-checks = true
+debug-assertions = true
+lto = false
+codegen-units = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2        # deliberately not 3/"z": keeps codegen close to the source
+debug = "full"       # full DWARF stays in the ELF, it is not loaded onto the target
+strip = "none"
+overflow-checks = true
+debug-assertions = false
+lto = "thin"
+codegen-units = 1
+incremental = false

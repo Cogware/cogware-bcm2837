@@ -1,0 +1,139 @@
+# Cogware RP3 — Raspberry Pi 3 firmware configuration
+#
+# Copy this file, together with kernel8.img and the stock Raspberry Pi
+# bootloader files (bootcode.bin, start.elf, fixup.dat), onto the FAT32
+# boot partition of the SD card.
+#
+# The VideoCore boots this board: it reads this file, loads kernel8.img to
+# 0x80000, and releases the ARM cores — all before the kernel's first
+# instruction runs.
+
+# --------------------------------------------------------------------------
+# Core requirements
+# --------------------------------------------------------------------------
+
+# Boot the ARM in AArch64 (also implied by the kernel8.img filename).
+arm_64bit=1
+
+# Load a raw image, not an ELF; kernel8.img is the default name for a
+# 64-bit kernel.
+kernel=kernel8.img
+
+# Do not let the firmware inject a device tree or ATAGs. The kernel discovers
+# what it needs through the VideoCore mailbox instead.
+disable_commandline_tags=1
+
+# --------------------------------------------------------------------------
+# Serial console (PL011 / UART0)
+# --------------------------------------------------------------------------
+#
+# IMPORTANT Pi 3 trap: by default the PL011 is wired to the on-board
+# Bluetooth module and the mini UART (UART1) is on the GPIO header. This
+# kernel drives the PL011, so Bluetooth must be disabled to swap them back.
+dtoverlay=disable-bt
+
+# Keep the UART powered and routed to GPIO 14/15
+# (header pins 8 = TX, 10 = RX, 6 = GND).
+enable_uart=1
+
+# Pin the PL011 reference clock at 48 MHz. The kernel's baud divisors are
+# computed against PL011_CLOCK_HZ = 48_000_000; if the firmware picks a
+# different clock the console comes out garbled. Note that QEMU reports this
+# clock as 3 MHz and ignores the divisors entirely, which is why the mismatch
+# only ever bites on real hardware.
+init_uart_clock=48000000
+init_uart_baud=115200
+
+# --------------------------------------------------------------------------
+# JTAG
+# --------------------------------------------------------------------------
+#
+# Routes GPIO 22-27 to ALT4 JTAG before the kernel runs (the kernel repeats
+# this itself in debug::jtag), so a probe can attach even if boot fails.
+#
+#   GPIO 22  ARM_TRST   header pin 15
+#   GPIO 23  ARM_RTCK   header pin 16
+#   GPIO 24  ARM_TDO    header pin 18
+#   GPIO 25  ARM_TCK    header pin 22
+#   GPIO 26  ARM_TDI    header pin 37
+#   GPIO 27  ARM_TMS    header pin 13
+enable_jtag_gpio=1
+
+# --------------------------------------------------------------------------
+# Memory split
+# --------------------------------------------------------------------------
+#
+# Bytes reserved for the VideoCore. The kernel queries the real value via
+# mailbox (GET_VC_MEMORY) rather than assuming this; 64 MiB matches
+# VC_MEM_DEFAULT_BYTES, the compile-time fallback used only if that probe
+# fails.
+#
+# Raise this to 128 or 256 when the framebuffer and V3D work begins.
+gpu_mem=64
+
+# --------------------------------------------------------------------------
+# Clocking - LEAVE COMMENTED UNTIL YOU HAVE READ docs/11-videocore-mailbox.md
+# --------------------------------------------------------------------------
+#
+# The kernel can raise the ARM clock at runtime through the mailbox:
+#
+#     let max = MAILBOX.lock().max_clock_rate(Clock::Arm)?;
+#     MAILBOX.lock().set_clock_rate(Clock::Arm, max, false)?;
+#
+# but the firmware clamps that request to whatever the settings below permit.
+# Raising the clock without matching voltage headroom causes instability and
+# SD card corruption.
+#
+# Stock Raspberry Pi 3 Model B is 1200 MHz ARM / 400 MHz core / 450 MHz SDRAM.
+#
+#arm_freq=1300
+#core_freq=500
+#sdram_freq=500
+#over_voltage=4
+
+# force_turbo=1 pins the clocks at maximum and burns a permanent, irreversible
+# OTP warranty bit. Understand that before uncommenting it.
+#force_turbo=1
+
+# Thermal ceiling in degrees Celsius; the firmware throttles above this.
+# The kernel can read the current temperature with Tag::GetTemperature - see
+# the `b` shell command.
+#temp_limit=80
+
+# --------------------------------------------------------------------------
+# Housekeeping
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# HDMI
+# --------------------------------------------------------------------------
+#
+# hdmi_blanking is deliberately NOT set.
+#
+# `hdmi_blanking=2` disables HDMI output at boot and expects userspace to
+# re-enable it with `tvservice -p`. A bare-metal kernel has no tvservice, so
+# the encoder never comes up, and the failure is silent: the mailbox still
+# allocates a framebuffer and every draw call still reports success, but
+# nothing is scanning out.
+#
+# Leave it unset. The default, 0, blanks on DPMS without disabling the output.
+
+# Drive HDMI even with no EDID. Without this the firmware only enables the
+# encoder if it saw a display at power-on, so an off monitor, a KVM, or a
+# passive adapter gives a blank screen with no error.
+hdmi_force_hotplug=1
+
+# If the screen is still blank, stop trusting EDID and force a known mode.
+# Group 1 is CEA (TV timings), group 2 is DMT (monitor timings).
+#hdmi_group=2
+#hdmi_mode=82    # 1920x1080 @ 60 Hz, DMT
+#hdmi_group=1
+#hdmi_mode=16    # 1920x1080 @ 60 Hz, CEA
+
+# Suppresses the rainbow splash. Comment out to diagnose a blank screen:
+# rainbow visible means HDMI works and the fault is in the kernel; no
+# rainbow means the fault is in this file or the cable.
+disable_splash=1
+
+# uncomment for HDMI Display out, must be commented for Hyperpixel
+display_auto_detect=1

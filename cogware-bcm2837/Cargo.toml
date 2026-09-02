@@ -1,0 +1,160 @@
+[package]
+name = "cogware-bcm2837"
+description = "Bare-metal BSP for the Broadcom BCM2837 (Raspberry Pi 3): boot, MMU, SMP, drivers and a no-alloc async executor"
+categories = ["embedded", "no-std", "hardware-support"]
+keywords = ["bcm2837", "raspberry-pi", "aarch64", "bare-metal", "bsp"]
+readme = "README.md"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+name = "cogware_bcm2837"
+path = "src/lib.rs"
+# No test harness on bare metal: `core` lacks `std::process`, needed by the
+# default harness and by doc tests.
+test = false
+bench = false
+doctest = false
+
+# Every dependency is optional; `default-features = false` links none. See
+# instructions.md rule 1.1.
+#
+# `embedded-hal`/`embedded-hal-async` are trait-only, no transitive deps, no
+# `std` — on by default so ecosystem driver crates work against our SPI/I2C/
+# GPIO unmodified.
+#
+# `embedded-sdmmc` is a real FAT implementation with its own transitive deps.
+# Off by default: a kernel that never touches the card should not pay for a
+# filesystem.
+[dependencies]
+embedded-hal = { version = "1.0", optional = true }
+embedded-hal-async = { version = "1.0", optional = true }
+embedded-sdmmc = { version = "0.10", optional = true, default-features = false }
+
+[features]
+default = [
+  "panic-handler",
+  "allocator",
+  "jtag",
+  "embedded-hal",
+  "embedded-hal-async",
+]
+
+# Supplies `#[panic_handler]`. Exactly one may exist per binary, so turn this
+# off if the downstream crate provides its own.
+panic-handler = []
+
+# Supplies `#[global_allocator]` and gates `extern crate alloc`. Off means no
+# `alloc` at all, not just a different allocator; `drivers::qoi` (the only
+# allocating module) goes with it. `heap::Kernel` stays installable either way.
+allocator = []
+
+# Routes JTAG to GPIO 22-27 and unlocks the debug registers during boot.
+# Harmless with no probe attached, but claims six pins.
+jtag = []
+
+# Emits one character per early-boot milestone, straight to the PL011 data
+# register (bypassing the driver), tracing the reset path before FP/SIMD, the
+# MMU, or any Rust runs. Bring-up aid; leave off for normal builds.
+boot-trace = []
+
+# Implements `embedded-hal` 1.0 traits (`digital`, `spi`, `i2c`, `delay`) for
+# `hal`'s pin/SPI/I2C types. Off removes the traits, not the drivers.
+embedded-hal = ["dep:embedded-hal"]
+
+# Implements `embedded-hal-async` 1.0 traits on the `task` executor, so a bus
+# wait yields to other tasks instead of spinning.
+embedded-hal-async = ["dep:embedded-hal-async", "embedded-hal"]
+
+# Implements `embedded-sdmmc`'s `BlockDevice`/`TimeSource` on the SD slot, so
+# that crate can mount a FAT16/32 volume. Off by default: unlike the two above
+# it is not trait-only. See `hal::sdmmc`.
+embedded-sdmmc = ["dep:embedded-sdmmc"]
+
+# ---------------------------------------------------------------------------
+# Examples. Each is a complete, bootable kernel.
+#
+# `test = false` on every one: `cargo test` would otherwise try to build them
+# with the test harness, which needs `std`.
+# ---------------------------------------------------------------------------
+
+[[example]]
+name = "hello-uart"
+path = "examples/hello-uart.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "multicore"
+path = "examples/multicore.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "async-tasks"
+path = "examples/async-tasks.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "heap"
+path = "examples/heap.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "display"
+path = "examples/display.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "sdcard"
+path = "examples/sdcard.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "gpio"
+path = "examples/gpio.rs"
+test = false
+required-features = ["panic-handler", "allocator", "embedded-hal"]
+
+[[example]]
+name = "bitbang"
+path = "examples/bitbang.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+[[example]]
+name = "buses"
+path = "examples/buses.rs"
+test = false
+required-features = ["panic-handler", "allocator", "embedded-hal"]
+
+# embedded-hal-async over the per-core executors: async buses, async delays and
+# async pin waits. Needs the same emulated chips as `buses`.
+[[example]]
+name = "async-bus"
+path = "examples/async-bus.rs"
+test = false
+required-features = ["panic-handler", "allocator", "embedded-hal-async"]
+
+# The full reference kernel: memory map, self-tests, cross-core dispatch and an
+# interactive shell. Big on purpose — it exercises everything the BSP exposes.
+[[example]]
+name = "shell"
+path = "examples/shell/main.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+# Receives a kernel over the UART and boots it, so the SD card is written once
+# rather than once per build. Not a demo: this is the hardware debug loop.
+[[example]]
+name = "chainloader"
+path = "examples/chainloader.rs"
+test = false
+required-features = ["panic-handler", "allocator"]

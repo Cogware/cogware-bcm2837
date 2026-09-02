@@ -1,0 +1,72 @@
+# Cogware BCM2837 — cargo configuration
+#
+# `cargo build`, `cargo run` and `cargo clippy` need no extra flags: target,
+# codegen options and the QEMU runner are all set here.
+#
+# The linker script comes from `cogware-bcm2837/build.rs` via `-T<link.ld>`.
+# Downstream crates must add `-C link-arg=-Tlink.ld` to their own rustflags,
+# since link args do not cross a dependency edge. See docs/16-using-the-bsp.md.
+
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+  # BCM2837 = 4x Cortex-A53; enables the erratum-843419 workaround.
+  "-C", "target-cpu=cortex-a53",
+
+  # Fixed load address, no dynamic loader: link.ld asserts an empty GOT.
+  "-C", "relocation-model=static",
+
+  # Needed for JTAG/GDB backtraces through optimised code.
+  "-C", "force-frame-pointers=yes",
+  "-C", "force-unwind-tables=yes",
+]
+
+# `cargo run` boots the ELF in QEMU (always needs an example, e.g.
+# `--example shell`).
+#
+#   -M raspi3b        4-core BCM2837. Do NOT pass -smp: fixed at 4.
+#   -serial mon:stdio PL011 console; mon: multiplexes the monitor, Ctrl-A X quits.
+#   -serial null      discards the AUX mini UART.
+#   -kernel <elf>     loaded at 0x80000.
+#
+# Args after `--` go to QEMU, e.g. `-- -s -S` for the GDB stub on :1234.
+runner = "qemu-system-aarch64 -M raspi3b -serial mon:stdio -serial null -display none -kernel"
+
+[alias]
+# Require `cargo install cargo-binutils`. An alias can only prefix a command
+# line, so the example must come before `--`, or it lands after the tool's own
+# `--` and reaches objcopy instead of Cargo:
+#
+#     cargo image  --example shell -- -O binary kernel8.img
+#     cargo disasm --example shell -- --disassemble --demangle --section-headers
+#     cargo syms   --example shell -- --numeric-sort
+image = "objcopy --release"
+disasm = "objdump --release"
+syms = "nm --release"
+
+# Build an example and chain-load it onto a real Pi:
+#
+#     cargo chain --example shell
+#     cargo chain --example multicore -- --port /dev/ttyUSB0
+#
+# Start this before power-cycling the Pi. Swaps the runner via `--config`
+# (an alias cannot set env vars); run from the workspace root. For
+# --build-only, use scripts/chainboot.sh instead.
+chain = [
+  "run",
+  "--release",
+  "--config",
+  "target.aarch64-unknown-none.runner='./scripts/chainboot-runner.sh'",
+]
+
+# Same, dev profile.
+chain-debug = [
+  "run",
+  "--config",
+  "target.aarch64-unknown-none.runner='./scripts/chainboot-runner.sh'",
+]
+
+[term]
+verbose = false

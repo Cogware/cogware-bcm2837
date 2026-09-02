@@ -1,0 +1,59 @@
+# .gitignore — cogware-bcm2837
+#
+# Rule of thumb: anything a build, a test run, or a tool regenerates is ignored;
+# anything a human wrote is committed.
+#
+# Cargo.lock is deliberately NOT ignored: this tree builds a kernel image, not
+# a library, so the exact dependency set belongs in history.
+
+# ---------------------------------------------------------------- build output
+/target
+
+# QEMU's -Trace/--trace exception log, and anything else that logs.
+*.log
+
+# Flat kernel images, SD card images, and -Screenshot screendumps. Does not
+# match cogware-bcm2837/assets/CogWare.qoi (source) or the checked-in
+# firmware/config.txt and openocd/rpi3.cfg.
+*.img
+*.ppm
+/*.png
+
+# ------------------------------------------------------------------ local only
+# Reference clones of other people's repositories, kept for comparison.
+/.reference
+
+# The coding rules are maintained locally and not published.
+/instructions.md
+
+# Byte-code from the Python helpers in scripts/.
+__pycache__/
+*.pyc
+
+# -------------------------------------------------------------- assistant data
+# Agent transcripts and caches: may contain source, host paths, credentials.
+.claude/
+.claude-flow/
+.anthropic/
+CLAUDE.md
+AGENTS.md
+
+# ----------------------------------------------------------- editors and IDEs
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.rsuser
+*.userprefs
+
+# VS Code: uncomment if you would rather not share launch/task configuration.
+#.vscode/
+
+# JetBrains / RustRover
+.idea/
+*.iml
+
+# ------------------------------------------------------------------- OS debris
+.DS_Store
+Thumbs.db
+desktop.ini

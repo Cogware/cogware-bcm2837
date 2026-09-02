@@ -1,0 +1,7 @@
+[toolchain]
+# The kernel deliberately tracks current stable Rust. Nothing in the tree
+# requires a nightly feature.
+channel = "stable"
+profile = "minimal"
+components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
+targets = ["aarch64-unknown-none"]
