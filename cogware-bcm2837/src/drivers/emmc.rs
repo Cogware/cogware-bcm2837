@@ -309,6 +309,78 @@ impl fmt::Display for Error {
     }
 }
 
+/// A snapshot of the controller, for when it will not answer.
+#[derive(Clone, Copy, Debug)]
+pub struct Diagnostics {
+    /// `STATUS`: the inhibit and card-presence bits.
+    pub status: u32,
+    /// `CONTROL0`: bus power and width.
+    pub control0: u32,
+    /// `CONTROL1`: the clock divider and enables actually in force.
+    pub control1: u32,
+    /// `INTERRUPT`: anything the controller has flagged.
+    pub interrupt: u32,
+    /// `SLOTISR_VER`: host controller version and vendor.
+    pub slotisr_ver: u32,
+    /// The rate the driver believes it is dividing.
+    pub base_clock: u32,
+    /// The last command it tried to send.
+    pub last_command: &'static str,
+}
+
+impl fmt::Display for Diagnostics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "status 0x{:08x}{}{}{} control1 0x{:08x} (div {}{}{}{}) irpt 0x{:08x} ver 0x{:08x} base {} Hz last {}",
+            self.status,
+            if self.status & (1 << 0) != 0 {
+                " CMD_INHIBIT"
+            } else {
+                ""
+            },
+            if self.status & (1 << 1) != 0 {
+                " DAT_INHIBIT"
+            } else {
+                ""
+            },
+            if self.status & (1 << 16) != 0 {
+                " CARD_INSERTED"
+            } else {
+                " NO_CARD"
+            },
+            self.control1,
+            // The divider as the controller holds it: low eight bits at 15..8,
+            // high two at 7..6. Printed decoded because reading it back out of
+            // the word by hand is where a wrong clock hides.
+            ((self.control1 >> 8) & 0xFF) | (((self.control1 >> 6) & 0x3) << 8),
+            if self.control1 & (1 << 0) != 0 {
+                " INTLEN"
+            } else {
+                ""
+            },
+            if self.control1 & (1 << 1) != 0 {
+                " STABLE"
+            } else {
+                ""
+            },
+            if self.control1 & (1 << 2) != 0 {
+                " CLK_EN"
+            } else {
+                ""
+            },
+            self.interrupt,
+            self.slotisr_ver,
+            self.base_clock,
+            if self.last_command.is_empty() {
+                "(none)"
+            } else {
+                self.last_command
+            }
+        )
+    }
+}
+
 /// The controller's own error interrupts, by name.
 ///
 /// The distinction that matters when a bus will not work: a CRC or end-bit
@@ -1183,6 +1255,25 @@ impl Emmc {
     // -----------------------------------------------------------------------
     // Full initialisation.
     // -----------------------------------------------------------------------
+
+    /// The controller's registers as they stand, for reporting a failure.
+    ///
+    /// A stalled controller says nothing about why through the error type
+    /// alone, and reproducing it costs a reboot. This is every register that
+    /// bears on the question, read in one go so a caller can print them
+    /// together and be done.
+    #[must_use]
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics {
+            status: self.regs().status.read(),
+            control0: self.regs().control0.read(),
+            control1: self.regs().control1.read(),
+            interrupt: self.regs().interrupt.read(),
+            slotisr_ver: self.regs().slotisr_ver.read(),
+            base_clock: self.base_clock,
+            last_command: self.last_cmd_name,
+        }
+    }
 
     /// What the driver is dividing to reach the bus clock, in Hz.
     ///
