@@ -210,7 +210,12 @@ pub enum Error {
     /// The command-timeout bit (`CTO_ERR`) was raised by the controller.
     CommandTimeout,
     /// The controller reported `CMD_INHIBIT` or `DAT_INHIBIT` for too long.
-    Busy,
+    /// The controller never came free. Carries the interrupt register as it
+    /// stood: zero means nothing was flagged and the wait simply expired,
+    /// which says the bus is too slow or the card is not answering. Bits set
+    /// mean the opposite -- the card answered and the answer was mangled,
+    /// which is what being clocked too fast looks like.
+    Busy(u32),
     /// The card did not respond, or produced a response the driver could not
     /// interpret.
     NoResponse,
@@ -248,7 +253,7 @@ impl fmt::Display for Error {
         let text = match self {
             Self::Timeout => "emmc timed out",
             Self::CommandTimeout => "command timeout",
-            Self::Busy => "controller busy",
+            Self::Busy(_) => "controller busy",
             Self::NoResponse => "no response from card",
             Self::ResetFailed => "controller reset failed",
             Self::ClockFailed => "clock did not stabilise",
@@ -265,6 +270,27 @@ impl fmt::Display for Error {
         // The status word is the whole content of this error. Folding it away
         // leaves "something went wrong" and a reboot to find out, which is a
         // long way to travel for a number the card already handed over.
+        if let Self::Busy(bits) = self {
+            if *bits == 0 {
+                // Nothing flagged: the wait ran out. The card never answered,
+                // which points at a bus too slow or a card not there rather
+                // than at a signal the controller could not read.
+                f.write_str(" (timed out, no error flagged)")?;
+            } else {
+                write!(f, " irpt 0x{bits:08x}")?;
+                let mut first = true;
+                for (mask, name) in IRPT_ERROR_NAMES {
+                    if bits & mask != 0 {
+                        f.write_str(if first { " (" } else { ", " })?;
+                        f.write_str(name)?;
+                        first = false;
+                    }
+                }
+                if !first {
+                    f.write_str(")")?;
+                }
+            }
+        }
         if let Self::CardStatus(bits) = self {
             write!(f, " 0x{bits:08x}")?;
             let mut first = true;
@@ -282,6 +308,23 @@ impl fmt::Display for Error {
         Ok(())
     }
 }
+
+/// The controller's own error interrupts, by name.
+///
+/// The distinction that matters when a bus will not work: a CRC or end-bit
+/// error means the card replied and the reply could not be read, which is what
+/// clocking it too fast looks like. A timeout with none of these set means it
+/// never replied at all.
+const IRPT_ERROR_NAMES: &[(u32, &str)] = &[
+    (1 << 16, "CTO_ERR/command timeout"),
+    (1 << 17, "CCRC_ERR/command crc"),
+    (1 << 18, "CEND_ERR/command end bit"),
+    (1 << 19, "CBAD_ERR/command index"),
+    (1 << 20, "DTO_ERR/data timeout"),
+    (1 << 21, "DCRC_ERR/data crc"),
+    (1 << 22, "DEND_ERR/data end bit"),
+    (1 << 24, "ACMD_ERR/auto command"),
+];
 
 /// The R1 error bits, by the names the SD Physical Layer Specification uses.
 ///
@@ -676,7 +719,7 @@ impl Emmc {
         });
         let interrupt = self.regs().interrupt.read();
         if !observed || (interrupt & int_bits::ERROR_MASK) != 0 {
-            Err(Error::Busy)
+            Err(Error::Busy(interrupt))
         } else {
             Ok(())
         }
@@ -690,7 +733,7 @@ impl Emmc {
         });
         let interrupt = self.regs().interrupt.read();
         if !observed || (interrupt & int_bits::ERROR_MASK) != 0 {
-            Err(Error::Busy)
+            Err(Error::Busy(0))
         } else {
             Ok(())
         }
@@ -1122,6 +1165,16 @@ impl Emmc {
     // Full initialisation.
     // -----------------------------------------------------------------------
 
+    /// What the driver is dividing to reach the bus clock, in Hz.
+    ///
+    /// Zero until [`Self::init`] has asked. Worth reporting next to the rate
+    /// the firmware advertises: if the two disagree the card is being clocked
+    /// wrongly, and every symptom after that is downstream of it.
+    #[must_use]
+    pub fn base_clock(&self) -> u32 {
+        self.base_clock
+    }
+
     /// Brings the card up: reset, CMD8 probe, ACMD41 busy-loop, CMD2 (CID),
     /// CMD3 (RCA), CMD9 (CSD), CMD7 (select), ACMD51 (SCR), optional 4-bit
     /// bus, CMD16 (block length 512).
@@ -1163,12 +1216,12 @@ impl Emmc {
                     CardType::V2Sc
                 };
             }
-            Err(Error::Busy) => return Err(Error::Busy),
+            Err(Error::Busy(bits)) => return Err(Error::Busy(bits)),
             Err(_) => {
                 // Legacy card: reset again, then ACMD41 with the SC argument.
                 self.reset_card()?;
                 if self.regs().status.read() & status_bits::CMD_INHIBIT != 0 {
-                    return Err(Error::Busy);
+                    return Err(Error::Busy(self.regs().interrupt.read()));
                 }
                 self.app_send_op_cond(ACMD41_ARG_SC)?;
                 self.card_type = CardType::V1;
