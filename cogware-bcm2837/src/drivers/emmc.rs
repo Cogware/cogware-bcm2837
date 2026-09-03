@@ -168,15 +168,21 @@ const R1_ERRORS_MASK: u32 = 0xFFF9_C004;
 // Status bit set by the card when it has just accepted an APP_CMD (CMD55).
 const ST_APP_CMD: u32 = 0x0000_0020;
 
-// Base clock of the EMMC block, in Hz, when the firmware will not say.
+// What the programmable divider divides, in Hz.
 //
-// Only a fallback. The rate the firmware actually runs this block at depends
-// on the core clock and on the `config.txt` in front of it, and getting it
-// wrong is not a small error: the divider is applied to the real base, so a
-// driver that assumes 41.67 MHz on a board running 200 MHz clocks the card
-// nearly five times over specification. That fails as CRC errors on some cards
-// and works on others, which is the worst way for it to fail.
-const BASE_CLOCK_FALLBACK: u32 = 41_666_666;
+// Not the rate the mailbox reports for the EMMC clock, and the difference has
+// cost enough to be worth writing down. On this board `GET_CLOCK_RATE` for
+// EMMC answers 200 MHz, which is the clock delivered to the block; the divider
+// sits behind a fixed prescale and divides this instead. Feeding it the
+// mailbox figure makes every divider 4.8 times too large -- card
+// initialisation, specified at 400 kHz, lands at 83 kHz, and the ACMD41
+// power-up poll stalls the controller for longer than the driver waits.
+//
+// Measured, not assumed: 41.67 MHz is the rate at which this controller
+// produces the frequencies it is asked for on this hardware. The mailbox rate
+// is reported next to it at boot so a board where that stops being true is
+// visible rather than mysterious.
+const BASE_CLOCK: u32 = 41_666_666;
 
 // The divider field is ten bits wide.
 const MAX_DIVIDER: u32 = 1023;
@@ -952,7 +958,7 @@ impl Emmc {
         // 10-bit divider as `base / (2 * div)`, but the reference uses the
         // integer ratio directly; match it.
         let base = if self.base_clock == 0 {
-            BASE_CLOCK_FALLBACK
+            BASE_CLOCK
         } else {
             self.base_clock
         };
@@ -1292,19 +1298,7 @@ impl Emmc {
     /// On success the card is in the transfer state at `FREQ_NORMAL` with
     /// [`Self::info`] populated.
     pub fn init(&mut self) -> Result<(), Error> {
-        // Ask the firmware what this block is clocked at, rather than assuming.
-        // The divider is applied to the real base whatever the driver believes,
-        // so believing the wrong number puts the card outside its timing and
-        // leaves it there. A board whose mailbox will not answer keeps the old
-        // assumption, which is no worse than it was.
-        self.base_clock = {
-            let mut mailbox = crate::drivers::MAILBOX.lock();
-            match mailbox.clock_rate(crate::drivers::mailbox::Clock::Emmc) {
-                Ok(hz) if hz > 0 => hz,
-                _ => BASE_CLOCK_FALLBACK,
-            }
-        };
-
+        self.base_clock = BASE_CLOCK;
         self.initialised = false;
         self.capacity_bytes = 0;
         self.bus_width = 1;
