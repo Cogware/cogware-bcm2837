@@ -168,8 +168,18 @@ const R1_ERRORS_MASK: u32 = 0xFFF9_C004;
 // Status bit set by the card when it has just accepted an APP_CMD (CMD55).
 const ST_APP_CMD: u32 = 0x0000_0020;
 
-// Base clock of the EMMC block on the BCM2837, in Hz.
-const BASE_CLOCK: u32 = 41_666_666;
+// Base clock of the EMMC block, in Hz, when the firmware will not say.
+//
+// Only a fallback. The rate the firmware actually runs this block at depends
+// on the core clock and on the `config.txt` in front of it, and getting it
+// wrong is not a small error: the divider is applied to the real base, so a
+// driver that assumes 41.67 MHz on a board running 200 MHz clocks the card
+// nearly five times over specification. That fails as CRC errors on some cards
+// and works on others, which is the worst way for it to fail.
+const BASE_CLOCK_FALLBACK: u32 = 41_666_666;
+
+// The divider field is ten bits wide.
+const MAX_DIVIDER: u32 = 1023;
 // SD initialisation runs at ≤ 400 kHz per the SD Physical Layer Specification.
 const FREQ_SETUP: u32 = 400_000;
 // Full-speed clock once the card is in the transfer state.
@@ -251,9 +261,52 @@ impl fmt::Display for Error {
             Self::OutOfRange => "block address out of range",
             Self::NotInitialised => "driver has not been initialised",
         };
-        f.write_str(text)
+        f.write_str(text)?;
+        // The status word is the whole content of this error. Folding it away
+        // leaves "something went wrong" and a reboot to find out, which is a
+        // long way to travel for a number the card already handed over.
+        if let Self::CardStatus(bits) = self {
+            write!(f, " 0x{bits:08x}")?;
+            let mut first = true;
+            for (mask, name) in R1_ERROR_NAMES {
+                if bits & mask != 0 {
+                    f.write_str(if first { " (" } else { ", " })?;
+                    f.write_str(name)?;
+                    first = false;
+                }
+            }
+            if !first {
+                f.write_str(")")?;
+            }
+        }
+        Ok(())
     }
 }
+
+/// The R1 error bits, by the names the SD Physical Layer Specification uses.
+///
+/// A card that refuses a command says why in this word, and the name is the
+/// difference between a diagnosis and another boot. `COM_CRC_ERROR` in
+/// particular means the bus is being clocked outside what the card can follow,
+/// which is a driver problem and not a card one.
+const R1_ERROR_NAMES: &[(u32, &str)] = &[
+    (1 << 31, "OUT_OF_RANGE"),
+    (1 << 30, "ADDRESS_ERROR"),
+    (1 << 29, "BLOCK_LEN_ERROR"),
+    (1 << 28, "ERASE_SEQ_ERROR"),
+    (1 << 27, "ERASE_PARAM"),
+    (1 << 26, "WP_VIOLATION"),
+    (1 << 25, "CARD_IS_LOCKED"),
+    (1 << 24, "LOCK_UNLOCK_FAILED"),
+    (1 << 23, "COM_CRC_ERROR"),
+    (1 << 22, "ILLEGAL_COMMAND"),
+    (1 << 21, "CARD_ECC_FAILED"),
+    (1 << 20, "CC_ERROR"),
+    (1 << 19, "ERROR"),
+    (1 << 16, "CSD_OVERWRITE"),
+    (1 << 15, "WP_ERASE_SKIP"),
+    (1 << 3, "AKE_SEQ_ERROR"),
+];
 
 // ---------------------------------------------------------------------------
 // Card type / info
@@ -482,6 +535,8 @@ pub struct Emmc {
     cid_raw: [u32; 4],
     // Last command name; debug aid printed in the shell's error message.
     last_cmd_name: &'static str,
+    // What the firmware says this block is clocked at, learned at `init`.
+    base_clock: u32,
 }
 
 impl Emmc {
@@ -497,6 +552,7 @@ impl Emmc {
             // SAFETY: forwarded to the caller of `Emmc::new`; the single-owner
             // invariant is cited above.
             block: unsafe { RegisterBlock::new(map::EMMC) },
+            base_clock: 0,
             initialised: false,
             card_type: CardType::Unknown,
             rca: 0,
@@ -778,12 +834,22 @@ impl Emmc {
 
     fn set_clock(&mut self, freq: u32) -> Result<(), Error> {
         // A divider of zero halts the clock. The datasheet describes the
-        // 10-bit divider as `BASE_CLOCK / (2 * div)`, but the reference uses
-        // the integer ratio directly; match it.
-        if freq == 0 || freq >= BASE_CLOCK {
+        // 10-bit divider as `base / (2 * div)`, but the reference uses the
+        // integer ratio directly; match it.
+        let base = if self.base_clock == 0 {
+            BASE_CLOCK_FALLBACK
+        } else {
+            self.base_clock
+        };
+        if freq == 0 || freq >= base {
             return Err(Error::ClockFailed);
         }
-        let div = BASE_CLOCK / freq;
+        // Rounded up, so the card is never clocked faster than it was asked
+        // for. Rounding down overclocks by up to one divider step, and the
+        // step that matters is the first one: initialisation has a hard
+        // ceiling of 400 kHz and a card is entitled to ignore anything above
+        // it.
+        let div = base.div_ceil(freq).min(MAX_DIVIDER);
         let control1 = control1_bits::clock_divider(div)
             | control1_bits::DATA_TOUNIT_MAX
             | control1_bits::CLK_EN
@@ -1063,6 +1129,19 @@ impl Emmc {
     /// On success the card is in the transfer state at `FREQ_NORMAL` with
     /// [`Self::info`] populated.
     pub fn init(&mut self) -> Result<(), Error> {
+        // Ask the firmware what this block is clocked at, rather than assuming.
+        // The divider is applied to the real base whatever the driver believes,
+        // so believing the wrong number puts the card outside its timing and
+        // leaves it there. A board whose mailbox will not answer keeps the old
+        // assumption, which is no worse than it was.
+        self.base_clock = {
+            let mut mailbox = crate::drivers::MAILBOX.lock();
+            match mailbox.clock_rate(crate::drivers::mailbox::Clock::Emmc) {
+                Ok(hz) if hz > 0 => hz,
+                _ => BASE_CLOCK_FALLBACK,
+            }
+        };
+
         self.initialised = false;
         self.capacity_bytes = 0;
         self.bus_width = 1;
