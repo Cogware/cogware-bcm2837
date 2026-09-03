@@ -893,20 +893,39 @@ impl Emmc {
         // ceiling of 400 kHz and a card is entitled to ignore anything above
         // it.
         let div = base.div_ceil(freq).min(MAX_DIVIDER);
+
+        // Stop the clock to the card before touching the divider. A frequency
+        // change made while the output is running is not required to be
+        // honoured, and on this controller it is not.
+        let running = self.regs().control1.read();
+        self.regs().control1.write(running & !control1_bits::CLK_EN);
+
+        // Internal clock on and divided, but not yet released to the card.
         let control1 = control1_bits::clock_divider(div)
             | control1_bits::DATA_TOUNIT_MAX
-            | control1_bits::CLK_EN
             | control1_bits::CLK_INTLEN;
         self.regs().control1.write(control1);
 
+        // Only once it is stable. Enabling the output during the settling
+        // window hands the card a malformed clock, and the window grows with
+        // the divider -- so the fault appears exactly when the driver starts
+        // asking for the slow rate that initialisation is specified at, and
+        // hides at every faster one.
         let stable = wait_until(1_000_000, || {
             self.regs().control1.read() & control1_bits::CLK_STABLE != 0
         });
         if !stable {
-            Err(Error::ClockFailed)
-        } else {
-            Ok(())
+            return Err(Error::ClockFailed);
         }
+        self.regs().control1.write(control1 | control1_bits::CLK_EN);
+
+        // The card is entitled to 74 clock cycles before the first command.
+        // At 400 kHz that is 185 microseconds, which no other delay in this
+        // sequence covers; at the rate the driver used to run it by accident,
+        // it was over in eight.
+        let cycles_us = 74_000_000u64 / u64::from(freq.max(1));
+        time::spin_for_micros(cycles_us.max(200));
+        Ok(())
     }
 
     fn reset_card(&mut self) -> Result<(), Error> {
