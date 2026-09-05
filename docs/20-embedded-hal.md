@@ -114,11 +114,27 @@ to `Other` too. The concrete error type is preserved in `Error::kind`'s
 `Debug` output; only the classification is lossy.
 
 **Operation sets differ.** `i2c::Operation` is just `Read`/`Write`;
-`spi::Operation` adds `Transfer`, `TransferInPlace` and `DelayNs(u32)`. The
-shared `transaction` helper coalesces a `[Write, Read]` pair into a single
-`write_read` so that the repeated START is preserved — running them as two
-separate operations would emit a STOP in between and read the wrong register on
-any auto-incrementing device.
+`spi::Operation` adds `Transfer`, `TransferInPlace` and `DelayNs(u32)`.
+The I²C adapter reborrows each buffer through our `I2cOperations` interface:
+there is no allocation, copy, or fixed maximum number of operations. The bus,
+not the adapter, controls the whole electrical transaction. Consecutive writes
+or reads are contiguous, direction changes use repeated START, and only the
+final byte of a read phase is NACKed.
+
+Bit-banged I²C supports arbitrary direction changes. An entirely empty read
+phase is rejected before START, rather than clocking an unrequested byte to
+release SDA; empty buffers within a non-empty phase are supported.
+The BSC supports a single
+direction or a write phase followed by a final read, with up to 65535 bytes per
+phase. Unsupported sequences (including a non-final read or an empty chained
+phase) return `UnsupportedTransaction` before START. If the write drains before
+the repeated START is armed, the result is `RepeatedStartLost`, not a silent
+STOP/START substitution. The write may already have changed the device.
+QEMU currently cannot emulate BSC chaining, so this error is expected there.
+
+`SharedI2c<B>` requires `B: I2cTransaction` for its embedded-hal implementations.
+Existing custom `I2cBus` implementations retain their simple API but must opt in
+to operation-list support; an incorrect generic fallback is not provided.
 
 **Unlike `SpiBus`, `SpiDevice` asserts and deasserts CS for each call.** A
 command-then-response exchange **must be one call**. Reading the JEDEC ID from
@@ -138,8 +154,12 @@ dev.transfer_in_place(&mut buf)?;   // buf[1..4] == [0xBF, 0x25, 0x41]
 ```
 
 or use `dev.transaction(&mut [Operation::Write(&cmd), Operation::Read(&mut id)])`,
-which holds CS across both. This bites on real silicon exactly as it does under
-QEMU, so the emulator is a faithful teacher here.
+which holds CS across both, as the device protocol requires.
+**QEMU does not wire SPI chip-select changes to its
+SSI slave**, so it cannot validate interrupted-command reset or CE timing.
+Native `Spi0::transaction` and the shared wrapper keep `TA` set across the
+entire operation list, including delays, and clean it up on errors. Host
+register tests check that state machine; physical CE timing remains untested.
 
 **Blanket impls are impossible.** `impl<T: our::OutputPin> eh::OutputPin for T`
 violates the orphan rule, so `src/hal/eh.rs` implements concretely on `Pin` and
@@ -161,10 +181,15 @@ handful of transfers at startup. Yielding lets other tasks run at transaction
 granularity, which is the granularity the lock works at anyway (§19.5). If you
 are streaming to a display over SPI at 30 fps, that is the point to revisit it.
 
-`examples/async-bus.rs` runs all of it: an ecosystem-shaped driver generic over
+`examples/async-bus.rs` runs an ecosystem-shaped driver generic over
 `embedded_hal_async::i2c::I2c`, four cores contending for one bus entirely from
-tasks (48 transactions, zero torn), and `DelayNs` sleeping on the timer while
+tasks (48 async scatter writes with locked readback), and `DelayNs` sleeping on the timer while
 the cores idle in `wfe` several hundred times rather than spinning.
+Strict repeated START is reported as unavailable in QEMU. The DS1338-specific
+readback explicitly allows STOP between pointer selection and reading, keeping
+both transfers under one lock without awaiting. The bitbang example separately
+checks a complete multi-direction operation list through the async shared
+adapter against a simulated slave, including its ACK/NACK and START/STOP edges.
 
 One trap it documents by avoiding: **never call `Barrier::wait` from an async
 task.** It is a blocking spin, and a blocking spin inside a cooperative

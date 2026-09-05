@@ -48,13 +48,13 @@ fn locking_available() -> bool {
 }
 ```
 
-That function is at `cogware-bcm2837\src\console.rs`. `_print` uses it at
-`cogware-bcm2837\src\console.rs`: if the MMU is on, it takes `UART.lock()`; if the
-MMU is off, it uses `UART.bypass()` and writes directly.
-
-The same split appears in `flush` (`cogware-bcm2837\src\console.rs`), `read_byte`
-(`cogware-bcm2837\src\console.rs`) and `statistics`
-(`cogware-bcm2837\src\console.rs`).
+All ordinary console entry points delegate to `with_writer`: `_print`,
+`flush`, `read_byte` and `statistics`. If the MMU is on, it holds `UART.lock()`
+for the whole closure. Contention is not permission to bypass the lock.
+Before the MMU is enabled it uses `UART.bypass()` under an `EarlyBorrow`
+guard made only from plain atomic loads and stores. A nested console call
+panics before constructing a second mutable reference; being single-core
+does not by itself exclude reentrant callbacks.
 
 This is sound only because of a boot-order invariant: the only code that prints
 with the MMU off is core 0 before `start_secondaries` releases the other cores.
@@ -109,6 +109,12 @@ and `DerefMut` implementations at `cogware-bcm2837\src\sync\spinlock.rs` expose
 ordinary references while the guard exists. `Drop` clears `holder` and stores
 `state = 0` with release ordering (`cogware-bcm2837\src\sync\spinlock.rs`).
 
+Both `SpinLockGuard<T>` and `task::MutexGuard<T>` carry
+`PhantomData<&mut T>`. A lock may protect a `Send` value such as `Cell<u32>`,
+but sharing references to its guard also requires `T: Sync`: those references
+expose `&T` without another lock acquisition. The marker preserves this
+distinction instead of inheriting the lock's weaker auto-trait bound.
+
 ## Non-blocking and unsafe paths
 
 `try_lock` at `cogware-bcm2837\src\sync\spinlock.rs` performs one
@@ -124,15 +130,14 @@ relaxed load and must not be treated as permission to access the payload without
 a guard.
 
 `bypass` at `cogware-bcm2837\src\sync\spinlock.rs` returns `&mut T` without taking
-the lock. Its safety comment gives the two legitimate uses:
-
-1. before the secondary cores have been released, when the MMU may still be off;
-2. from the panic path after `force_unlock`, where a hung console is worse than
-   a data race.
+the lock. The caller must exclude all other accesses and outstanding references,
+including on the same core. Single-core boot before the MMU is enabled meets
+that contract. A panic while a guard remains outstanding does not.
 
 `force_unlock` at `cogware-bcm2837\src\sync\spinlock.rs` unconditionally releases the
-lock. It is unsafe because the caller must know the previous holder will not
-continue touching the protected value.
+lock. It is unsafe because no outstanding guard may subsequently be used or
+dropped, and no reference to the payload may remain live. The BSP's panic path
+does not use it.
 
 ## `Once<T>`
 
@@ -242,11 +247,14 @@ This is why `IRQ_HANDLER` in `cogware-bcm2837\src\arch\exception.rs` is an
 `AtomicUsize` raw function pointer rather than a locked structure. The handler
 path uses an acquire load and calls the function directly.
 
-It is also why `console::with_writer` uses `try_lock` rather than `lock`
-(`cogware-bcm2837\src\console.rs`). A fault dump should take the console once for
-the whole report if it can, but if the fault happened while this core already
-held the UART lock, blocking would deadlock. Garbled output is an acceptable
-failure mode; no output is not.
+Faults and panics use `console::with_emergency_writer`
+(`cogware-bcm2837\src\console.rs`), not ordinary `with_writer`. It tries the
+UART lock once to keep a report together when possible, but its writer never
+borrows the driver or changes its counters. It accesses only the external
+PL011 data and status registers through stateless `RegisterBlock` helpers.
+If the UART is already held, output can interleave without creating overlapping
+Rust references or a data race in driver RAM. UART waits are bounded and a
+failure is returned as `fmt::Error`.
 
 The exception details are in [07-exceptions-and-irq.md](07-exceptions-and-irq.md).
 
@@ -272,7 +280,16 @@ instead, which is why it is the only correct choice across a suspension point.
 
 The console deliberately keeps its `SpinLock`. It is taken and released inside
 a single `write_fmt`, never across an `.await`, and a fault handler must be
-able to reach it with `try_lock` — which an async lock could not offer.
+able to try it once without blocking. Emergency output is deliberately excluded
+from the ordinary UART byte statistics.
+
+## Regression checks
+
+`cargo run --release --example regressions` checks the guards' positive and
+negative auto-trait bounds at compile time, then checks cross-core console
+exclusion and emergency output while UART is held. It also takes a returning
+breakpoint inside that critical section and verifies timer progress alongside a
+continuously yielding task. Successful completion prints `regressions: PASS`.
 
 ## Checklist for new synchronisation
 

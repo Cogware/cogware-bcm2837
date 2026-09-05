@@ -16,6 +16,7 @@
 use core::{
     cell::UnsafeCell,
     hint,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -77,7 +78,10 @@ impl<T: ?Sized> SpinLock<T> {
                 .is_ok()
             {
                 self.holder.store(me, Ordering::Relaxed);
-                return SpinLockGuard { lock: self };
+                return SpinLockGuard {
+                    lock: self,
+                    _borrow: PhantomData,
+                };
             }
 
             while self.state.load(Ordering::Relaxed) != 0 {
@@ -95,7 +99,10 @@ impl<T: ?Sized> SpinLock<T> {
         {
             self.holder
                 .store(crate::cpu::core_id() as u32, Ordering::Relaxed);
-            Some(SpinLockGuard { lock: self })
+            Some(SpinLockGuard {
+                lock: self,
+                _borrow: PhantomData,
+            })
         } else {
             None
         }
@@ -115,12 +122,10 @@ impl<T: ?Sized> SpinLock<T> {
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that no other core can be touching the data.
-    /// Two legitimate uses:
-    ///
-    /// * before the secondary cores have been released, when the MMU may still
-    ///   be off and `lock()` would be UNPREDICTABLE;
-    /// * from the panic handler, after [`Self::force_unlock`].
+    /// The caller must exclude every other access and outstanding reference
+    /// to the data, including on this core. This is used during single-core
+    /// boot, when the MMU is off and `lock()` would be UNPREDICTABLE. A panic
+    /// does not by itself make bypassing a held lock sound.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn bypass(&self) -> &mut T {
         unsafe { &mut *self.data.get() }
@@ -130,8 +135,9 @@ impl<T: ?Sized> SpinLock<T> {
     ///
     /// # Safety
     ///
-    /// Only for the panic path, to recover a lock held by a core that will
-    /// never release it.
+    /// No outstanding guard may subsequently be used or dropped, and no
+    /// reference to the protected data may remain live. Merely observing a
+    /// panic on another core does not establish these conditions.
     pub unsafe fn force_unlock(&self) {
         self.holder.store(NO_HOLDER, Ordering::Relaxed);
         self.state.store(0, Ordering::Release);
@@ -141,6 +147,8 @@ impl<T: ?Sized> SpinLock<T> {
 /// RAII guard returned by [`SpinLock::lock`].
 pub struct SpinLockGuard<'a, T: ?Sized> {
     lock: &'a SpinLock<T>,
+    // Sharing the guard shares &T, not just the lock: it requires T: Sync.
+    _borrow: PhantomData<&'a mut T>,
 }
 
 impl<T: ?Sized> Deref for SpinLockGuard<'_, T> {

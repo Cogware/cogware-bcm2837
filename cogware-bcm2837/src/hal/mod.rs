@@ -47,8 +47,8 @@
 //! ```
 //!
 //! With the `embedded-hal-async` feature the async traits are implemented too,
-//! on top of [`crate::task`]: waiting for a FIFO yields to the executor instead
-//! of spinning. See [`asynch`].
+//! on top of [`crate::task`]: bus wrappers yield between complete blocking
+//! transactions, never while holding chip select or a bus lock. See [`asynch`].
 //!
 //! # Filesystems on the SD card
 //!

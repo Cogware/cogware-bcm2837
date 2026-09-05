@@ -178,6 +178,9 @@ async fn async_driver() {
             println!("  the driver is generic over embedded_hal_async::i2c::I2c");
             println!("  and never names a BCM2837 type");
         }
+        Err(i2c::Error::RepeatedStartLost) => {
+            println!("  strict async repeated START unavailable (expected in QEMU)");
+        }
         Err(error) => println!("  driver failed: {error:?}"),
     }
 }
@@ -210,8 +213,9 @@ async fn async_delay() {
 
 /// Writes a per-core byte to a per-core NVRAM address and reads it back.
 ///
-/// Every `write_read` is one acquisition of the bus lock, so a value that
-/// comes back wrong means two cores' transactions interleaved.
+/// The async scatter write is one transaction. DS1338 explicitly permits STOP
+/// after register selection, so readback uses two transfers under one lock;
+/// it does not disguise that device-specific choice as repeated START.
 async fn bus_task(core: usize) {
     let mut bus = BUS;
     let address = SCRATCH_BASE + core as u8;
@@ -220,13 +224,27 @@ async fn bus_task(core: usize) {
     for round in 0..ROUNDS {
         let written = (core as u8) << 4 | (round as u8 & 0x0F);
 
-        if bus.write(RTC, &[address, written]).await.is_err() {
+        if AsyncI2c::transaction(
+            &mut bus,
+            RTC,
+            &mut [
+                embedded_hal_async::i2c::Operation::Write(&[address]),
+                embedded_hal_async::i2c::Operation::Write(&[written]),
+            ],
+        )
+        .await
+        .is_err()
+        {
             MISMATCHES.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
         let mut read = [0u8; 1];
-        if bus.write_read(RTC, &[address], &mut read).await.is_err() {
+        let read_result = SharedI2c::transaction(&bus, |hardware| {
+            hardware.write(RTC, &[address])?;
+            hardware.read(RTC, &mut read)
+        });
+        if read_result.is_err() {
             MISMATCHES.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -266,6 +284,7 @@ async fn report() {
         if mismatches == 0 { "ok" } else { "FAIL" }
     );
     println!("  each await point is a whole transaction, never half of one");
+    println!("  writes exercise async W/W lists; DS1338 readback explicitly allows STOP");
 
     println!();
     println!("Per-core executors:");

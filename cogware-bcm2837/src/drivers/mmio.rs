@@ -111,6 +111,30 @@ impl<T> RegisterBlock<T> {
         // SAFETY: upheld by the caller of `new`.
         unsafe { &*(self.base as *const T) }
     }
+
+    /// Reads an external device register without borrowing an owning driver.
+    ///
+    /// # Safety
+    ///
+    /// `base + offset` must be a mapped, aligned, readable 32-bit MMIO register,
+    /// outside Rust-managed memory. Concurrent register access must be valid
+    /// for the device. This is reserved for stateless emergency output.
+    pub(crate) unsafe fn read_raw(base: usize, offset: usize) -> u32 {
+        // SAFETY: the caller supplies a valid external MMIO register address.
+        unsafe { ptr::read_volatile((base + offset) as *const u32) }
+    }
+
+    /// Writes an external device register without borrowing an owning driver.
+    ///
+    /// # Safety
+    ///
+    /// `base + offset` must be a mapped, aligned, writable 32-bit MMIO register,
+    /// outside Rust-managed memory. Concurrent register access must be valid
+    /// for the device. No read-modify-write atomicity is provided.
+    pub(crate) unsafe fn write_raw(base: usize, offset: usize, value: u32) {
+        // SAFETY: the caller supplies a valid external MMIO register address.
+        unsafe { ptr::write_volatile((base + offset) as *mut u32, value) };
+    }
 }
 
 /// Ensures previously issued MMIO writes have been observed by the peripheral

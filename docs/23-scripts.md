@@ -254,9 +254,23 @@ board.
 | Linux | Windows | Default | Meaning |
 | --- | --- | --- | --- |
 | `--payload <name\|path>` | `-Payload` | `hello-uart` | Example name to build, or an existing flat image |
-| `--port <n>` | `-Port` | 4444 | TCP port for the emulated PL011 |
+| `--port <n>` | `-Port` | 4444 | Loopback-only TCP port for the emulated PL011 |
 | `--run-seconds <n>` | `-RunSeconds` | 8 | How long to capture the payload's output |
 | `--log <path>` | `-LogPath` | none | Write the whole transcript here as well |
+| `--pad-to-max` | `-PadToMax` | off | Push a private copy padded to 8 MiB and verify the received length |
+| `--expect <text>` | `-Expect` | none | Fail unless this literal payload output appears in the transcript |
+
+The regression options retain a transcript under `target/` when no explicit
+log path is supplied. Padding never changes the input image, and its temporary
+copy is removed on exit. For example:
+
+```bash
+./scripts/chainboot-qemu.sh --payload multicore --pad-to-max \
+    --expect 'All 4 cores online'
+```
+
+The large-BSS and pre-release allocation fixture is documented in
+[22-chainloading.md](22-chainloading.md).
 
 Both start QEMU with `wait=on`, which is **required**: with `wait=off` the
 guest runs immediately and everything printed before the pusher connects is

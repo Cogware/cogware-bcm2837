@@ -7,53 +7,51 @@
 
 use core::{
     panic::PanicInfo,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{arch::cpu, console};
+use crate::{
+    arch::{cpu, mmu},
+    console,
+};
 
 /// Set by the first core to panic, so later ones do not interleave output.
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
-/// Guards against a panic raised from inside the panic handler itself.
-static PANIC_DEPTH: AtomicU32 = AtomicU32::new(0);
-
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    // A nested panic means formatting or the console is broken; stop.
-    if PANIC_DEPTH.fetch_add(1, Ordering::Relaxed) > 0 {
+    cpu::mask_interrupts();
+    let already_panicking = if mmu::is_enabled() {
+        // Claim the report across cores, including a recursive formatting panic.
+        PANICKING.swap(true, Ordering::AcqRel)
+    } else {
+        // Boot is single-core here, and exclusive atomics require the MMU.
+        let previous = PANICKING.load(Ordering::Relaxed);
+        PANICKING.store(true, Ordering::Relaxed);
+        previous
+    };
+    if already_panicking {
         cpu::halt();
     }
 
-    // The current console holder will never finish; steal the lock.
-    //
-    // SAFETY: the panic path; a garbled line is preferable to a silent hang.
-    unsafe { console::force_unlock() };
-
-    if PANICKING.swap(true, Ordering::AcqRel) {
-        // Another core is already printing; report briefly and stop.
-        crate::println!("[core {}] panicked as well, stopping.", cpu::core_id());
-        cpu::halt();
-    }
-
-    crate::println!();
-    crate::println!("############### KERNEL PANIC ###############");
-    crate::println!("core   : {}", cpu::core_id());
-    crate::println!("EL     : {}", cpu::current_el());
-
-    match info.location() {
-        Some(location) => crate::println!(
-            "at     : {}:{}:{}",
-            location.file(),
-            location.line(),
-            location.column()
-        ),
-        None => crate::println!("at     : <unknown location>"),
-    }
-
-    crate::println!("message: {}", info.message());
-    crate::println!("###########################################");
-
-    console::flush();
+    // There is no second diagnostic channel if the UART itself fails.
+    let _ = console::with_emergency_writer(|w| {
+        writeln!(w)?;
+        writeln!(w, "############### KERNEL PANIC ###############")?;
+        writeln!(w, "core   : {}", cpu::core_id())?;
+        writeln!(w, "EL     : {}", cpu::current_el())?;
+        match info.location() {
+            Some(location) => writeln!(
+                w,
+                "at     : {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )?,
+            None => writeln!(w, "at     : <unknown location>")?,
+        }
+        writeln!(w, "message: {}", info.message())?;
+        writeln!(w, "###########################################")
+    });
     cpu::halt();
 }

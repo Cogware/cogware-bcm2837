@@ -6,8 +6,9 @@
 //! memset proportional to heap size) and a free-list built up at init (a walk
 //! of the whole arena).
 //!
-//! The arena is instead the free DRAM above the image, and [`init`] only
-//! records two addresses: nothing is written, zeroed or walked. The region is
+//! The arena is instead the free DRAM above the image. Initialisation only
+//! records bounds and an optional chain-load park page: no arena memory is
+//! written, zeroed or walked. The region is
 //! already mapped Normal / read-write / execute-never by
 //! [`arch::mmu::memory_map`](crate::arch::mmu::memory_map) (the "free DRAM
 //! (ARM)" entry), so there is no page-table work either.
@@ -38,7 +39,9 @@
 //! `max(size, align)` rounded up, so the caller's alignment is satisfied by
 //! construction. Padding skipped to reach that alignment is not leaked:
 //! `Inner::release_range` splits it into power-of-two blocks and pushes them
-//! onto the appropriate free lists.
+//! onto the appropriate free lists. A validated chain-load park page is
+//! permanently excluded from both carving and padding donation, including
+//! when the payload never releases its secondaries.
 //!
 //! # Trade-offs
 //!
@@ -154,8 +157,11 @@ pub struct Stats {
     pub start: usize,
     /// One past the last address of the arena.
     pub end: usize,
-    /// One past the highest address the bump pointer has ever reached. Memory
-    /// below this has been touched; memory above it is untouched DRAM.
+    /// Inclusive-exclusive parked-code page withheld by a chain-loader.
+    /// This is not an allocation and stays reserved for this kernel's lifetime.
+    pub reserved_range: Option<(usize, usize)>,
+    /// One past the highest address the bump pointer has ever reached. Except
+    /// for the reserved page, memory below this is allocated or cached.
     pub watermark: usize,
     /// Bytes currently handed out, counted in whole blocks.
     pub live: usize,
@@ -183,6 +189,7 @@ struct Inner {
     next: usize,
     /// One past the last usable address.
     limit: usize,
+    reserved: Option<memory::ReservedPage>,
     /// LIFO free list head per size class.
     heads: [*mut Free; CLASS_COUNT],
     /// Length of each free list, so [`stats`] need not walk the lists.
@@ -207,6 +214,7 @@ impl Inner {
         Self {
             next: 0,
             limit: 0,
+            reserved: None,
             heads: [ptr::null_mut(); CLASS_COUNT],
             free_counts: [0; CLASS_COUNT],
             start: 0,
@@ -259,7 +267,23 @@ impl Inner {
     /// Stops the padding skipped by [`Inner::carve`] from being leaked. The
     /// loop runs at most once per size class: each step either doubles the
     /// alignment of `lo` or halves the remaining span.
-    fn release_range(&mut self, mut lo: usize, hi: usize) {
+    fn release_range(&mut self, lo: usize, hi: usize) {
+        if let Some(page) = self.reserved
+            && lo < page.end
+            && page.start < hi
+        {
+            if lo < page.start {
+                self.release_unreserved_range(lo, page.start);
+            }
+            if page.end < hi {
+                self.release_unreserved_range(page.end, hi);
+            }
+        } else {
+            self.release_unreserved_range(lo, hi);
+        }
+    }
+
+    fn release_unreserved_range(&mut self, mut lo: usize, hi: usize) {
         while hi - lo >= MIN_SIZE {
             let span = hi - lo;
 
@@ -284,17 +308,67 @@ impl Inner {
     /// Takes a fresh block of `class` from the bump pointer.
     fn carve(&mut self, class: usize) -> *mut u8 {
         let size = class_size(class);
-        let base = align_up(self.next, size);
-
-        // `align_up` can wrap only for absurd sizes; check anyway so a
-        // corrupted `next` cannot become a wild pointer.
-        if base < self.next || base > self.limit || size > self.limit - base {
+        let Some(base) = carve_address(self.next, self.limit, size, self.reserved) else {
             return ptr::null_mut();
-        }
+        };
 
         if base > self.next {
             self.release_range(self.next, base);
         }
+
+        const fn carve_address(
+            next: usize,
+            limit: usize,
+            size: usize,
+            reserved: Option<memory::ReservedPage>,
+        ) -> Option<usize> {
+            let Some(aligned) = next.checked_add(size - 1) else {
+                return None;
+            };
+            let mut base = aligned & !(size - 1);
+            let Some(end) = base.checked_add(size) else {
+                return None;
+            };
+            if let Some(page) = reserved
+                && base < page.end
+                && page.start < end
+            {
+                let Some(aligned) = page.end.checked_add(size - 1) else {
+                    return None;
+                };
+                base = aligned & !(size - 1);
+            }
+            if base > limit || size > limit - base {
+                None
+            } else {
+                Some(base)
+            }
+        }
+
+        const _: () = {
+            let page = memory::ReservedPage {
+                start: 0x1000000,
+                end: 0x1001000,
+            };
+            assert!(matches!(
+                carve_address(0xf00000, 0x4000000, 0x1000000, Some(page)),
+                Some(0x2000000)
+            ));
+            assert!(matches!(
+                carve_address(0x1000000, 0x4000000, 4096, Some(page)),
+                Some(0x1001000)
+            ));
+            assert!(matches!(
+                carve_address(0xfff000, 0x4000000, 4096, Some(page)),
+                Some(0xfff000)
+            ));
+            assert!(matches!(
+                carve_address(0xf00000, 0x4000000, 0x1000000, None),
+                Some(0x1000000)
+            ));
+            assert!(carve_address(usize::MAX, usize::MAX, 4096, None).is_none());
+            assert!(carve_address(0x1000000, 0x1001000, 4096, Some(page)).is_none());
+        };
 
         self.next = base + size;
         base as *mut u8
@@ -369,7 +443,7 @@ unsafe impl GlobalAlloc for Kernel {
 /// than literals, so the heap cannot drift out of step with the region the MMU
 /// maps.
 ///
-/// Costs two stores. No memory is read, written or zeroed.
+/// Records a constant amount of metadata; no arena memory is read or written.
 ///
 /// # Safety
 ///
@@ -377,8 +451,20 @@ unsafe impl GlobalAlloc for Kernel {
 /// [`SpinLock`], which needs the MMU) and after
 /// [`drivers::mailbox::probe_memory`](crate::drivers::mailbox::probe_memory)
 /// (which is what moves [`memory::vc_mem_base`] off its default), and before
-/// any secondary core is released.
+/// any secondary core is released. The caller must own the whole arena: a
+/// chain-load park reservation requires the BSP's reserved boot path instead.
 pub unsafe fn init() {
+    // SAFETY: this entry has the same single-initialisation requirements.
+    unsafe { init_with_reservation(None) };
+}
+
+/// Initialises the ordinary heap with a validated chain-load page excluded.
+///
+/// # Safety
+///
+/// Same requirements as `init`; any reservation must have passed
+/// `memory::validate_chainload` against the current firmware memory bounds.
+pub(crate) unsafe fn init_with_reservation(reserved: Option<memory::ReservedPage>) {
     let start = align_up(layout::kernel_end(), MIN_SIZE);
     let end = memory::vc_mem_base();
 
@@ -391,6 +477,7 @@ pub unsafe fn init() {
         heap.start = start;
         heap.next = start;
         heap.limit = end;
+        heap.reserved = reserved;
     });
 
     // Release: the bounds above must be visible to any core that observes
@@ -471,6 +558,7 @@ pub fn stats() -> Stats {
     HEAP.with(|heap| Stats {
         start: heap.start,
         end: heap.limit,
+        reserved_range: heap.reserved.map(|page| (page.start, page.end)),
         watermark: heap.next,
         live: heap.live,
         peak: heap.peak,
@@ -484,9 +572,17 @@ pub fn stats() -> Stats {
 }
 
 impl Stats {
-    /// Total size of the arena in bytes.
+    /// Usable size of the arena, excluding any parked-code reservation.
     pub const fn capacity(&self) -> usize {
-        self.end - self.start
+        self.end - self.start - self.reserved_bytes()
+    }
+
+    /// Bytes permanently withheld from allocation by the boot handoff.
+    pub const fn reserved_bytes(&self) -> usize {
+        match self.reserved_range {
+            Some((start, end)) => end - start,
+            None => 0,
+        }
     }
 
     /// Bytes never yet handed to anyone: the span above the bump pointer.
@@ -494,7 +590,17 @@ impl Stats {
     /// Not the same as "free": blocks on the free lists are also available, but
     /// are counted below the watermark.
     pub const fn untouched(&self) -> usize {
-        self.end - self.watermark
+        let withheld = match self.reserved_range {
+            Some((start, end)) if self.watermark < end => {
+                end - if self.watermark > start {
+                    self.watermark
+                } else {
+                    start
+                }
+            }
+            _ => 0,
+        };
+        self.end - self.watermark - withheld
     }
 
     /// Bytes sitting on the free lists, ready to be reused.

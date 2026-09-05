@@ -58,6 +58,13 @@ Assembly is also required because the kernel uses hard-float
 `cogware-bcm2837\src\arch\mod.rs` includes the file with `global_asm!` and substitutes
 Rust constants for the core-id mask and stack size, avoiding silent drift.
 
+The optional [chain-load handoff](22-chainloading.md) uses x4 for `CGCHAIN1`,
+x5 for the secondary park-page base and x6 for its exact 4096-byte length.
+`_start` immediately saves those registers in x21-x23, which survive the
+exception-level transitions and cache walkers. The firmware ABI in x0-x3 is
+not repurposed. Only core 0 forwards the saved descriptor to Rust, after BSS
+zeroing; secondaries do not interpret their entry registers as a descriptor.
+
 ## Core identity and stacks
 The reset path reads `MPIDR_EL1`:
 ```asm
@@ -165,6 +172,9 @@ state, it would erase live tables and locks.
 Core 0 tail-calls:
 ```asm
 mov     x0, x19
+mov     x1, x21
+mov     x2, x22
+mov     x3, x23
 b       kernel_boot_primary
 ```
 Secondaries tail-call:
@@ -172,7 +182,8 @@ Secondaries tail-call:
 mov     x0, x19
 b       kernel_boot_secondary
 ```
-The core id is the first Rust argument. There is no caller to return to.
+The core id is the first Rust argument. The primary additionally receives the
+saved chain-load marker, base and length. There is no caller to return to.
 Both symbols are defined in `cogware-bcm2837\src\boot.rs`; the application
 entry points are named by the `entry!` macro in each bootable example or
 downstream kernel.
@@ -248,12 +259,19 @@ drivers::mailbox::probe_memory()
 ```
 This is before the MMU because pre-MMU memory is already uncached from the
 ARM's point of view, so the mailbox buffer needs no cache maintenance.
+For a recognised chain-load marker, core 0 also probes ARM RAM and validates
+the descriptor's arithmetic, exact page length, alignment and firmware bounds.
+The page must lie above the entire 16 MiB image/BSS/stack window. Unknown
+markers retain ordinary boot behaviour; a recognised but invalid descriptor
+prints an error and halts before enabling the heap. No supplied address is
+dereferenced during validation.
 Then core 0 builds tables and enables its own runtime state:
 ```rust
 mmu::init()
 arch::init_core()
 ```
-After that, it marks itself online, initialises the heap, routes JTAG pins and
+After that, it marks itself online, initialises the heap with the validated
+optional park-page exclusion, routes JTAG pins and
 unlocks debug if the `jtag` feature is enabled, builds a `BootInfo`, and calls
 the primary application entry point that `entry!` named. In the shell example,
 that application code prints the banner, memory map and self-test output.

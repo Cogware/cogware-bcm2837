@@ -64,6 +64,14 @@ The boot-time table currently prints this map:
 The order is most-specific first. That is why `.text`, `.rodata`, and
 `.data/.bss + stacks` appear before the broader DRAM ranges.
 
+A chain-loaded kernel can also withhold one 4 KiB secondary park page from
+the heap inside `free DRAM (ARM)`. The [entry-register handoff](22-chainloading.md)
+is checked against firmware-confirmed bounds before allocation is enabled.
+This is an ownership exclusion, not a mapping change: the page remains Normal,
+RW and execute-never for this kernel, while still-parked cores execute with
+their MMUs off. Both heap carving and padding donation exclude it permanently.
+The rest of ARM RAM is still available; see [13-heap.md](13-heap.md).
+
 The policy is W^X. `.text` is read-only and executable. `.rodata` is read-only
 and no-execute. Every writable region is no-execute. Nothing in this kernel runs
 at EL0, so `UXN` is set everywhere as well.

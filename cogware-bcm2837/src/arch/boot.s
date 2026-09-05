@@ -18,7 +18,8 @@
  * Register usage across this file:
  *   x19 - core id (0..3)
  *   x20 - stack top for this core
- * Neither is preserved for the callee; the branch into Rust is a tail call.
+ *   x21-x23 - incoming x4-x6 chain-load descriptor, primary only
+ * No caller requires their preservation; the branch into Rust is a tail call.
  */
 
 .equ CURRENTEL_EL1, 0b0100
@@ -207,6 +208,11 @@
 _start:
     /* Mask every asynchronous exception until VBAR_EL1 is installed. */
     msr     DAIFSet, #0b1111
+    /* Save before trace/scratch use or cache walkers. Callee-saved registers
+     * survive every boot path; no shared memory is safe before .bss is zero. */
+    mov     x21, x4
+    mov     x22, x5
+    mov     x23, x6
     TRACE_INIT
     TRACE   0x31                        /* '1' reset entry */
     TRACE   0x41                        /* 'A' past the LED blink */
@@ -365,6 +371,9 @@ _start:
 
     TRACE   0x38                        /* '8' entering Rust */
     mov     x0, x19
+    mov     x1, x21                     /* handover magic */
+    mov     x2, x22                     /* parked-code page base */
+    mov     x3, x23                     /* reserved byte count */
     b       kernel_boot_primary
 
 .L_secondary:

@@ -23,21 +23,33 @@
 .PARAMETER LogPath
     Write the whole transcript here as well.
 
+.PARAMETER PadToMax
+    Pad a private copy of the payload to the supported 8 MiB limit, exercising
+    the relocation boundary without changing the input image.
+
+.PARAMETER Expect
+    Fail unless this literal text appears in the captured target transcript.
+
 .EXAMPLE
     .\scripts\chainboot-qemu.ps1
     .\scripts\chainboot-qemu.ps1 -Payload multicore
     .\scripts\chainboot-qemu.ps1 -Payload .\kernel8.img -RunSeconds 15
+    .\scripts\chainboot-qemu.ps1 -Payload multicore -PadToMax -Expect 'All 4 cores online'
 #>
 param(
     [string]$Payload = 'hello-uart',
     [int]$Port = 4444,
     [int]$RunSeconds = 8,
-    [string]$LogPath
+    [string]$LogPath,
+    [switch]$PadToMax,
+    [string]$Expect
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
+$paddedImage = $null
+$createdPaddedImage = $false
 
 try {
     # ----------------------------------------------------------------------
@@ -58,6 +70,24 @@ try {
 
     $loader = Join-Path $root 'target\aarch64-unknown-none\release\examples\chainloader'
 
+    if ($PadToMax) {
+        $bytes = [System.IO.File]::ReadAllBytes($image)
+        if ($bytes.Length -gt 8MB) { throw 'Payload exceeds the 8 MiB loader limit.' }
+        $paddedImage = Join-Path $root "target\chainboot-padded-$PID-$Port.img"
+        $file = [System.IO.File]::Open($paddedImage, [System.IO.FileMode]::CreateNew)
+        $createdPaddedImage = $true
+        try {
+            $file.Write($bytes, 0, $bytes.Length)
+            $file.SetLength(8MB)
+        } finally {
+            $file.Dispose()
+        }
+        $image = $paddedImage
+    }
+    if (($PadToMax -or $Expect) -and -not $LogPath) {
+        $LogPath = Join-Path $root "target\chainboot-qemu-$Port.log"
+    }
+
     # ----------------------------------------------------------------------
     # QEMU. The FIRST -serial is the PL011 the kernel prints on; the second is
     # the AUX mini UART and is discarded.
@@ -65,7 +95,7 @@ try {
     $qemuArgs = @(
         '-M', 'raspi3b',
         '-display', 'none',
-        '-serial', "tcp::$Port,server=on,wait=on",
+        '-serial', "tcp:127.0.0.1:$Port,server=on,wait=on",
         '-serial', 'null',
         '-kernel', $loader
     )
@@ -90,7 +120,19 @@ try {
     if ($LogPath) { $push.LogPath = $LogPath }
 
     & (Join-Path $PSScriptRoot 'minipush.ps1') @push
+    if ($PadToMax -or $Expect) {
+        $transcript = Get-Content -LiteralPath $LogPath -Raw
+        if ($PadToMax -and $transcript -notmatch 'received\s*:\s*8388608\b') {
+            throw 'The loader did not receive the complete 8 MiB regression payload.'
+        }
+        if ($Expect -and -not $transcript.Contains($Expect)) {
+            throw "Expected target output was not observed: $Expect"
+        }
+    }
 } finally {
     if ($qemu -and -not $qemu.HasExited) { Stop-Process -Id $qemu.Id -Force }
+    if ($createdPaddedImage -and (Test-Path -LiteralPath $paddedImage)) {
+        Remove-Item -LiteralPath $paddedImage
+    }
     Pop-Location
 }

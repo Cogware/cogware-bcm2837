@@ -333,10 +333,16 @@ pub unsafe extern "C" fn __trap_handler(frame: &mut TrapFrame) {
     if kind.is_some_and(ExceptionKind::is_irq) {
         match irq_handler() {
             Some(handler) => handler(frame),
-            None => crate::println!(
-                "[core {}] unexpected IRQ with no handler installed",
-                cpu::core_id()
-            ),
+            None => {
+                // Reporting must not wait for code interrupted with UART held.
+                let _ = crate::console::with_emergency_writer(|w| {
+                    writeln!(
+                        w,
+                        "[core {}] unexpected IRQ with no handler installed",
+                        cpu::core_id()
+                    )
+                });
+            }
         }
         return;
     }
@@ -344,18 +350,23 @@ pub unsafe extern "C" fn __trap_handler(frame: &mut TrapFrame) {
     // `BRK` is used by `trigger_breakpoint` and by JTAG sessions; step over it
     // instead of treating it as fatal.
     if syndrome.class() == 0x3C {
-        crate::println!(
-            "[core {}] breakpoint at {:#018x} (BRK #{})",
-            cpu::core_id(),
-            frame.elr_el1,
-            syndrome.iss() & 0xFFFF
-        );
+        let _ = crate::console::with_emergency_writer(|w| {
+            writeln!(
+                w,
+                "[core {}] breakpoint at {:#018x} (BRK #{})",
+                cpu::core_id(),
+                frame.elr_el1,
+                syndrome.iss() & 0xFFFF
+            )
+        });
         frame.skip_faulting_instruction();
         return;
     }
 
     dump(frame);
-    crate::println!("[core {}] halting.", cpu::core_id());
+    let _ = crate::console::with_emergency_writer(|w| {
+        writeln!(w, "[core {}] halting.", cpu::core_id())
+    });
     cpu::halt();
 }
 
@@ -364,42 +375,40 @@ pub fn dump(frame: &TrapFrame) {
     let syndrome = frame.syndrome();
     let core = cpu::core_id();
 
-    // Held for the whole dump so another core's output cannot land inside a
-    // register listing.
-    crate::console::with_writer(|w| {
-        use core::fmt::Write;
-
-        let _ = writeln!(w);
-        let _ = writeln!(
+    // Prefer one locked report, but never borrow an interrupted UART driver.
+    // If the UART fails there is no second channel on which to report that.
+    let _ = crate::console::with_emergency_writer(|w| {
+        writeln!(w)?;
+        writeln!(
             w,
             "=============== EXCEPTION on core {core} ==============="
-        );
-        let _ = match frame.exception_kind() {
+        )?;
+        match frame.exception_kind() {
             Some(kind) => writeln!(w, "vector : {} (slot {})", kind.name(), frame.kind),
             None => writeln!(w, "vector : invalid slot {}", frame.kind),
-        };
-        let _ = writeln!(w, "ESR_EL1: {:#018x}  {}", frame.esr_el1, syndrome);
+        }?;
+        writeln!(w, "ESR_EL1: {:#018x}  {}", frame.esr_el1, syndrome)?;
 
         if let Some(status) = syndrome.fault_status() {
-            let _ = writeln!(w, "fault  : {status}");
+            writeln!(w, "fault  : {status}")?;
         }
         if let Some(write) = syndrome.is_write() {
-            let _ = writeln!(w, "access : {}", if write { "write" } else { "read" });
+            writeln!(w, "access : {}", if write { "write" } else { "read" })?;
         }
         if syndrome.is_abort() {
-            let _ = writeln!(w, "FAR_EL1: {:#018x}", frame.far_el1);
+            writeln!(w, "FAR_EL1: {:#018x}", frame.far_el1)?;
         }
 
-        let _ = writeln!(w, "ELR_EL1: {:#018x}", frame.elr_el1);
-        let _ = writeln!(w, "SPSR_EL1:{:#018x}", frame.spsr_el1);
-        let _ = writeln!(w, "SP_EL0 : {:#018x}", frame.sp_el0);
-        let _ = writeln!(w, "FPSR/CR: {:#010x} / {:#010x}", frame.fpsr, frame.fpcr);
+        writeln!(w, "ELR_EL1: {:#018x}", frame.elr_el1)?;
+        writeln!(w, "SPSR_EL1:{:#018x}", frame.spsr_el1)?;
+        writeln!(w, "SP_EL0 : {:#018x}", frame.sp_el0)?;
+        writeln!(w, "FPSR/CR: {:#010x} / {:#010x}", frame.fpsr, frame.fpcr)?;
 
         // x0-x27 in rows of four, then x28-x30 labelled with the ABI roles that
         // matter for reading a backtrace.
         for row in 0..7 {
             let base = row * 4;
-            let _ = writeln!(
+            writeln!(
                 w,
                 "x{:<2}={:#018x} x{:<2}={:#018x} x{:<2}={:#018x} x{:<2}={:#018x}",
                 base,
@@ -410,17 +419,17 @@ pub fn dump(frame: &TrapFrame) {
                 frame.gpr[base + 2],
                 base + 3,
                 frame.gpr[base + 3]
-            );
+            )?;
         }
-        let _ = writeln!(
+        writeln!(
             w,
             "x28={:#018x} x29={:#018x} (fp) x30={:#018x} (lr)",
             frame.gpr[28], frame.gpr[29], frame.gpr[30]
-        );
-        let _ = writeln!(
+        )?;
+        writeln!(
             w,
             "========================================================"
-        );
+        )
     });
 }
 

@@ -67,6 +67,108 @@ pub trait SpiBus {
 
     /// Clocks `data` out and overwrites it with what came back.
     fn transfer_in_place(&mut self, data: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Runs a complete transaction without releasing hardware chip select.
+    ///
+    /// Software buses need no extra state. Hardware buses override this to
+    /// keep their controller active across transfers and delays in `body`.
+    fn transaction<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R
+    where
+        Self: Sized,
+    {
+        body(self)
+    }
+}
+
+/// One buffer in an I2C transaction.
+pub enum I2cOperation<'a> {
+    /// Read bytes, acknowledging all but the last byte of this read phase.
+    Read(&'a mut [u8]),
+    /// Write bytes without a new address between adjacent write buffers.
+    Write(&'a [u8]),
+}
+
+impl I2cOperation<'_> {
+    pub(crate) fn is_read(&self) -> bool {
+        matches!(self, Self::Read(_))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Read(bytes) => bytes.len(),
+            Self::Write(bytes) => bytes.len(),
+        }
+    }
+}
+
+/// A reborrowable operation list, without allocation or a buffer-count limit.
+///
+/// Adapters translate their operation type one buffer at a time. The list's
+/// length, directions and buffer lengths must remain unchanged during a call.
+pub trait I2cOperations {
+    /// Number of operations.
+    fn len(&self) -> usize;
+
+    /// Whether there are no operations.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Reborrows the operation at `index`, which must be less than `len()`.
+    fn operation(&mut self, index: usize) -> I2cOperation<'_>;
+}
+
+impl I2cOperations for [I2cOperation<'_>] {
+    fn len(&self) -> usize {
+        <[I2cOperation<'_>]>::len(self)
+    }
+
+    fn operation(&mut self, index: usize) -> I2cOperation<'_> {
+        match &mut self[index] {
+            I2cOperation::Read(bytes) => I2cOperation::Read(bytes),
+            I2cOperation::Write(bytes) => I2cOperation::Write(bytes),
+        }
+    }
+}
+
+impl<const N: usize> I2cOperations for [I2cOperation<'_>; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn operation(&mut self, index: usize) -> I2cOperation<'_> {
+        self.as_mut_slice().operation(index)
+    }
+}
+
+pub(crate) struct I2cPhase {
+    pub end: usize,
+    pub read: bool,
+    pub length: Option<usize>,
+    pub last_nonempty: usize,
+}
+
+pub(crate) fn i2c_phase(operations: &mut (impl I2cOperations + ?Sized), start: usize) -> I2cPhase {
+    let read = operations.operation(start).is_read();
+    let mut phase = I2cPhase {
+        end: start,
+        read,
+        length: Some(0),
+        last_nonempty: start,
+    };
+    while phase.end < operations.len() {
+        let operation = operations.operation(phase.end);
+        if operation.is_read() != read {
+            break;
+        }
+        let length = operation.len();
+        if length != 0 {
+            phase.last_nonempty = phase.end;
+        }
+        phase.length = phase.length.and_then(|total| total.checked_add(length));
+        phase.end += 1;
+    }
+    phase
 }
 
 /// The operations every I2C bus offers, hardware or bit-banged.
@@ -85,6 +187,23 @@ pub trait I2cBus {
     /// Writes `write` then reads `read`, without releasing the bus between.
     fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8])
     -> Result<(), Self::Error>;
+}
+
+/// An I2C bus that preserves the complete operation-list transaction contract.
+///
+/// Adjacent buffers of the same direction are contiguous; direction changes
+/// use repeated START, and only the final phase ends in STOP. A controller
+/// unable to implement a requested sequence must return an error, not split it.
+///
+/// Separate from [`I2cBus`] so existing implementations of the simpler bus
+/// trait keep compiling without silently claiming transaction support.
+pub trait I2cTransaction: I2cBus {
+    /// Executes `operations` as one bus transaction.
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Self::Error>;
 }
 
 // -- hardware ---------------------------------------------------------------
@@ -110,6 +229,20 @@ impl SpiBus for crate::drivers::spi::Spi0 {
     #[inline]
     fn transfer_in_place(&mut self, data: &mut [u8]) -> Result<(), Self::Error> {
         Self::transfer_in_place(self, data)
+    }
+
+    fn transaction<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        Self::transaction(self, body)
+    }
+}
+
+impl I2cTransaction for crate::drivers::i2c::I2c {
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Self::Error> {
+        Self::transaction(self, address, operations)
     }
 }
 
@@ -172,6 +305,20 @@ where
     }
 }
 
+impl<SDA, SCL> I2cTransaction for crate::hal::bitbang::I2c<SDA, SCL>
+where
+    SDA: crate::hal::digital::OpenDrainPin,
+    SCL: crate::hal::digital::OpenDrainPin,
+{
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Self::Error> {
+        Self::transaction(self, address, operations)
+    }
+}
+
 impl<SDA, SCL> I2cBus for crate::hal::bitbang::I2c<SDA, SCL>
 where
     SDA: crate::hal::digital::OpenDrainPin,
@@ -231,6 +378,17 @@ impl<B: I2cBus + 'static> SharedI2c<B> {
     /// short.
     pub fn transaction<R>(&self, body: impl FnOnce(&mut B) -> R) -> R {
         self.bus.with(body)
+    }
+}
+
+impl<B: I2cTransaction + 'static> I2cTransaction for SharedI2c<B> {
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Self::Error> {
+        self.bus
+            .with(|bus| I2cTransaction::transaction(bus, address, operations))
     }
 }
 
@@ -363,7 +521,8 @@ impl<P: OutputPin> ChipSelect for GpioCs<P> {
 ///
 /// For a bus with exactly one device whose select is tied low, or for the
 /// hardware peripheral driving `CE0`/`CE1` itself — the controller asserts the
-/// line around each transfer and nothing needs to happen here.
+/// line around the whole [`SpiBus::transaction`] and nothing needs to happen
+/// on a separate GPIO.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoCs;
 
@@ -388,6 +547,14 @@ pub struct SpiDevice<B: SpiBus + 'static, CS: ChipSelect> {
     cs: CS,
 }
 
+struct Selected<'a, CS: ChipSelect>(&'a mut CS);
+
+impl<CS: ChipSelect> Drop for Selected<'_, CS> {
+    fn drop(&mut self) {
+        self.0.deselect();
+    }
+}
+
 impl<B: SpiBus + 'static, CS: ChipSelect> SpiDevice<B, CS> {
     /// Binds a chip select to a locked bus.
     pub const fn new(bus: &'static SpinLock<B>, cs: CS) -> Self {
@@ -403,9 +570,8 @@ impl<B: SpiBus + 'static, CS: ChipSelect> SpiDevice<B, CS> {
 
         self.bus.with(|bus| {
             cs.select();
-            let result = body(bus);
-            cs.deselect();
-            result
+            let _selected = Selected(cs);
+            SpiBus::transaction(bus, body)
         })
     }
 

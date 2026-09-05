@@ -27,7 +27,8 @@
 //! The executor therefore keeps *two* wake masks:
 //!
 //! * `ready`, whose tasks are polled immediately, and
-//! * `polling`, whose tasks are polled once per idle tick.
+//! * `polling`, whose tasks are polled after an idle wake or a timer period
+//!   spent processing ready tasks.
 //!
 //! [`poll_again`] puts the current task in the second. When `ready` empties,
 //! the executor promotes `polling` into `ready` and issues `wfe`. The

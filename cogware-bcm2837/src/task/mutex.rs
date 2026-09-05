@@ -23,6 +23,7 @@
 use core::{
     cell::UnsafeCell,
     future::Future,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
@@ -69,7 +70,10 @@ impl<T: ?Sized> Mutex<T> {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
-            .map(|_| MutexGuard { mutex: self })
+            .map(|_| MutexGuard {
+                mutex: self,
+                _borrow: PhantomData,
+            })
     }
 
     /// Whether the lock is currently held.
@@ -121,6 +125,8 @@ impl<'a, T: ?Sized> Future for Lock<'a, T> {
 pub struct MutexGuard<'a, T: ?Sized> {
     /// The mutex this guard unlocks on drop.
     mutex: &'a Mutex<T>,
+    // Sharing the guard shares &T, not just the mutex: it requires T: Sync.
+    _borrow: PhantomData<&'a mut T>,
 }
 
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {

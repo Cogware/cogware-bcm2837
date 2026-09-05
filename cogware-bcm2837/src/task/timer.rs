@@ -2,7 +2,7 @@
 //! Timer futures built on the architectural counter.
 //!
 //! There is no timer interrupt, so these are poll-driven: a sleeping task is
-//! re-polled once per executor idle tick and compares `CNTPCT_EL0` against its
+//! re-polled once per executor polling tick and compares `CNTPCT_EL0` against its
 //! deadline. The core sleeps in `wfe` in between, bounded by the generic
 //! timer's event stream.
 //!

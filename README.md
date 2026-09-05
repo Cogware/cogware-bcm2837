@@ -141,6 +141,7 @@ Every example is a complete, bootable kernel.
 | --- | --- |
 | [`hello-uart`](cogware-bcm2837/examples/hello-uart.rs) | the smallest possible kernel, and a boot self-check |
 | [`multicore`](cogware-bcm2837/examples/multicore.rs) | releasing cores 1-3, a shared `SpinLock`, a `Barrier` |
+| [`regressions`](cogware-bcm2837/examples/regressions.rs) | guard auto-traits, console exclusion, emergency output and timer fairness |
 | [`async-tasks`](cogware-bcm2837/examples/async-tasks.rs) | the executor, channels, timers, cross-core spawning |
 | [`heap`](cogware-bcm2837/examples/heap.rs) | `Box`/`Vec`/`String`, allocator statistics, size classes |
 | [`display`](cogware-bcm2837/examples/display.rs) | framebuffer mode set, the QOI logo, text over an image |

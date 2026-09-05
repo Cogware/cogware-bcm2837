@@ -449,6 +449,13 @@ pub enum CardType {
 }
 
 impl CardType {
+    const fn block_address(self, block: u32) -> Option<u32> {
+        match self {
+            Self::V1 | Self::V2Sc => block.checked_mul(BLOCK_SIZE as u32),
+            _ => Some(block),
+        }
+    }
+
     /// Human-readable label used by the shell's `sd` command.
     pub const fn name(&self) -> &'static str {
         match self {
@@ -460,6 +467,30 @@ impl CardType {
         }
     }
 }
+
+// These regressions run in every build, without a test harness or an SD card.
+const _: () = {
+    let cards = [CardType::V1, CardType::V2Sc, CardType::V2Hc];
+    let blocks = [0, 1, 512, u32::MAX / 512, u32::MAX / 512 + 1, u32::MAX];
+    let mut card = 0;
+    while card < cards.len() {
+        let mut case = 0;
+        while case < blocks.len() {
+            let block = blocks[case];
+            let expected = if card == 2 {
+                block as u64
+            } else {
+                block as u64 * 512
+            };
+            match cards[card].block_address(block) {
+                Some(address) => assert!(address as u64 == expected),
+                None => assert!(expected > u32::MAX as u64),
+            }
+            case += 1;
+        }
+        card += 1;
+    }
+};
 
 /// Descriptive information about the currently-initialised card.
 ///
@@ -1216,11 +1247,10 @@ impl Emmc {
 
         // SC cards address bytes, HC/XC cards address 512-byte blocks; only
         // the argument differs.
-        let block_address = if self.card_type == CardType::V2Sc {
-            start_block.checked_shl(9).ok_or(Error::OutOfRange)?
-        } else {
-            start_block
-        };
+        let block_address = self
+            .card_type
+            .block_address(start_block)
+            .ok_or(Error::OutOfRange)?;
 
         // BLKSIZECNT: `BLKCNT` in bits 16-31, `BLKSIZE` in bits 0-9.
         self.regs()

@@ -18,13 +18,14 @@
 //! 1. **Console** — so that everything after it can report its own failure.
 //! 2. **VideoCore memory probe** — must run with the MMU *off*, so the mailbox
 //!    buffer is already uncached as the GPU requires. Its answer decides where
-//!    the non-cacheable window goes.
+//!    the non-cacheable window goes. A recognised chain-load descriptor also
+//!    requires a confirmed ARM memory range before its park page is reserved.
 //! 3. **MMU** — needs the probe's answer.
 //! 4. **`init_core`** — enables the MMU and caches and installs the vector
 //!    table. Locks are illegal before this point: the exclusive monitor needs
 //!    Normal memory.
 //! 5. **`mark_online`** — the first thing that takes a lock.
-//! 6. **Heap** — two stores into DRAM the map already covers.
+//! 6. **Heap** — publish arena bounds and the optional validated park page.
 //! 7. **JTAG** — claims GPIO 22-27, so it needs the GPIO lock.
 //!
 //! Secondary cores skip 1, 2, 3, 6 and 7's pin routing: core 0 did those once,
@@ -32,6 +33,7 @@
 
 use crate::{
     arch::{self, cpu, exception, mmu},
+    bsp::memory,
     console,
     drivers::mailbox,
     smp,
@@ -196,7 +198,12 @@ unsafe extern "Rust" {
 /// Called exactly once, by the boot assembly, at EL1 with a valid stack, the
 /// FPU ungated and `.bss` zeroed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kernel_boot_primary(core_id: usize) -> ! {
+pub unsafe extern "C" fn kernel_boot_primary(
+    core_id: usize,
+    handover_magic: usize,
+    handover_base: usize,
+    handover_length: usize,
+) -> ! {
     // Console first: everything after this can report its own failures.
     //
     // SAFETY: core 0, MMU off, no other core running.
@@ -210,6 +217,33 @@ pub unsafe extern "C" fn kernel_boot_primary(core_id: usize) -> ! {
     //
     // SAFETY: core 0, MMU off, no secondary core running.
     let videocore_memory = unsafe { mailbox::probe_memory() }.map_err(ProbeError::Mailbox);
+    let reservation = if handover_magic == memory::CHAINLOAD_MAGIC {
+        // SAFETY: core 0, MMU off, and no secondary has entered the payload.
+        // The descriptor is never dereferenced: only firmware-confirmed bounds
+        // determine whether the page may be withheld from this kernel's heap.
+        let arm_memory = unsafe { crate::drivers::MAILBOX.bypass().arm_memory() };
+        let validated = match (arm_memory, videocore_memory) {
+            (Ok((base, size)), Ok(_)) if memory::vc_mem_probed() => memory::validate_chainload(
+                handover_magic,
+                handover_base,
+                handover_length,
+                base,
+                size,
+                memory::vc_mem_base(),
+            ),
+            _ => Err("firmware could not confirm chain-load reservation bounds"),
+        };
+        match validated {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                crate::println!("Invalid chain-load handover: {error}; heap remains disabled.");
+                console::flush();
+                cpu::halt();
+            }
+        }
+    } else {
+        None
+    };
     // SAFETY: the same window as the probe above — core 0, MMU still off, no
     // secondary running — which is what makes the unlocked mailbox sound.
     let arm_clock = unsafe { mailbox::probe_clock() }
@@ -229,11 +263,11 @@ pub unsafe extern "C" fn kernel_boot_primary(core_id: usize) -> ! {
     // Locks are legal from here on.
     smp::mark_online();
 
-    // Two stores: the arena is DRAM the map already covers, so there is
-    // nothing to zero.
+    // Only metadata changes: the arena is already mapped DRAM, with nothing
+    // to zero. Publish any park-page exclusion before enabling allocations.
     //
     // SAFETY: core 0, MMU on, mailbox already probed, no secondary running.
-    unsafe { crate::heap::init() };
+    unsafe { crate::heap::init_with_reservation(reservation) };
     boot_trace(b'd');
 
     #[cfg(feature = "jtag")]

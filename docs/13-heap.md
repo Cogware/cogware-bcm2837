@@ -28,9 +28,10 @@ Two obvious designs fail that rule:
 * A classic free-list heap that threads the whole arena onto a list at init
   costs a walk over every block before the shell appears.
 
-This allocator does neither. `heap::init()` records two addresses and stores an
-`AtomicBool`. Nothing is zeroed, nothing is walked, and no free list is built.
-The arena already exists as mapped DRAM, so there is no page-table work either.
+This allocator does neither. Initialisation records the arena bounds and an
+optional chain-load reservation, then publishes an `AtomicBool`. No arena
+memory is zeroed or walked, and no free list is built. The arena already
+exists as mapped DRAM, so there is no page-table work either.
 
 ```text
 kernel image            heap arena                            VideoCore
@@ -73,6 +74,26 @@ No new mapping is created for the heap. `memory_map()` already covers the same
 span as `free DRAM (ARM)`, mapped Normal, read-write, and execute-never. The
 heap just starts using that region after the MMU has made it ordinary cacheable
 memory.
+
+### Chain-loaded kernels
+
+The [chain-loader](22-chainloading.md) hands off one 4 KiB page containing the
+secondary park code through x4-x6. The primary boot path validates that page
+against firmware-confirmed ARM RAM before calling the crate-private reserved
+heap initialiser. The page must be aligned, entirely inside the arena and at
+or above the linker's 16 MiB kernel window.
+
+That page is permanently excluded for this kernel's lifetime, even if the
+application allocates without ever starting its secondaries. Both bump carving
+and padding free-list donation skip it. The remaining RAM, including the
+loader's former staging area, stays available. `Stats::reserved_range` and
+`reserved_bytes()` report the hole; `capacity()` and `untouched()` subtract
+withheld bytes, preserving `capacity == live + cached + untouched`.
+
+Ordinary firmware boots have no reserved page. Public unsafe `heap::init()`
+remains usable for a caller with no handover reservation; the BSP's standard
+boot path selects the appropriate initialiser automatically. Do not reinitialise
+a running heap to discard a reservation.
 
 ## Size classes
 
@@ -157,6 +178,11 @@ The padding skipped to reach the aligned address is not leaked. `Inner::carve`
 passes it to `Inner::release_range`, which donates the gap to the ordinary free
 lists.
 
+If a chain-load park page lies in the gap, `release_range` splits the donation
+into the spans before and after that page. Merely moving the bump pointer
+would be insufficient: donating the whole gap could hand the executing park
+code back out on a later free-list allocation.
+
 ```text
 next before carve
      |
@@ -216,9 +242,10 @@ MMU on the calling core. The primary boot path enforces the order:
 
 ```text
 drivers::mailbox::probe_memory()
+validate optional chain-load page against firmware ARM/VideoCore bounds
 arch::mmu::init()
 arch::init_core()
-heap::init()
+heap::init_with_reservation(validated_page_or_none)  // crate-private boot path
 release later work
 ```
 

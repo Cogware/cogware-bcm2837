@@ -50,6 +50,101 @@ pub const SPIN_TABLE_BASE: usize = 0x0000_00D8;
 /// QEMU SMP trampoline at 0x300. Mapped, but never allocated from.
 pub const FIRMWARE_RESERVED_END: usize = KERNEL_LOAD_ADDR;
 
+/// Version-1 chain-load handoff marker in entry register x4 (`CGCHAIN1`).
+///
+/// x5 supplies the parked-code page base and x6 its length. x0-x3 retain the
+/// firmware ABI. The primary validates the descriptor before initialising
+/// the heap; the page remains excluded even if secondaries are never started.
+pub const CHAINLOAD_MAGIC: usize = 0x4347_4348_4149_4E31;
+
+/// Exact reserved length accepted by the version-1 chain-load protocol.
+pub const CHAINLOAD_PAGE_BYTES: usize = 4096;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReservedPage {
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(crate) const fn validate_chainload(
+    magic: usize,
+    base: usize,
+    length: usize,
+    arm_base: usize,
+    arm_size: usize,
+    vc_base: usize,
+) -> Result<Option<ReservedPage>, &'static str> {
+    if magic != CHAINLOAD_MAGIC {
+        return Ok(None);
+    }
+    let Some(end) = base.checked_add(length) else {
+        return Err("reserved page address overflow");
+    };
+    let Some(arm_end) = arm_base.checked_add(arm_size) else {
+        return Err("firmware ARM memory overflow");
+    };
+    if length != CHAINLOAD_PAGE_BYTES
+        || !base.is_multiple_of(CHAINLOAD_PAGE_BYTES)
+        || base < crate::arch::mmu::FINE_WINDOW_END
+        || base < arm_base
+        || end > arm_end
+        || end > vc_base
+        || end > PERIPHERAL_BASE
+    {
+        return Err("reserved page is outside confirmed free ARM RAM");
+    }
+    Ok(Some(ReservedPage { start: base, end }))
+}
+
+const _: () = {
+    let base = crate::arch::mmu::FINE_WINDOW_END;
+    let limit = 64 * 1024 * 1024;
+    let page = CHAINLOAD_PAGE_BYTES;
+    assert!(matches!(
+        validate_chainload(CHAINLOAD_MAGIC, base, page, 0, limit, limit),
+        Ok(Some(ReservedPage { start, end })) if start == base && end == base + page
+    ));
+    assert!(matches!(
+        validate_chainload(CHAINLOAD_MAGIC, limit - page, page, base, limit - base, limit),
+        Ok(Some(ReservedPage { start, end })) if start == limit - page && end == limit
+    ));
+    assert!(matches!(
+        validate_chainload(0, usize::MAX, usize::MAX, usize::MAX, usize::MAX, 0),
+        Ok(None)
+    ));
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base - page, page, 0, limit, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base + 1, page, 0, limit, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, page * 2, 0, limit, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, 0, 0, limit, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, page, 0, base, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, page, 0, limit, base).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, page, base + page, limit, limit).is_err());
+    assert!(validate_chainload(CHAINLOAD_MAGIC, limit - page, page, 0, limit - 1, limit).is_err());
+    assert!(
+        validate_chainload(
+            CHAINLOAD_MAGIC,
+            PERIPHERAL_BASE,
+            page,
+            0,
+            PERIPHERAL_END,
+            PERIPHERAL_END,
+        )
+        .is_err()
+    );
+    assert!(validate_chainload(CHAINLOAD_MAGIC, base, page, 1, usize::MAX, limit).is_err());
+    assert!(
+        validate_chainload(
+            CHAINLOAD_MAGIC,
+            usize::MAX - page + 1,
+            page,
+            0,
+            limit,
+            limit
+        )
+        .is_err()
+    );
+};
+
 /// VideoCore memory reservation assumed before the mailbox has been asked.
 ///
 /// The firmware default (`gpu_mem=64` in `config.txt`), used as a fallback

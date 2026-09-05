@@ -147,7 +147,7 @@ pub struct SlotInfo {
     pub polls: u64,
     /// Whether the task will be polled on the next pass.
     pub ready: bool,
-    /// Whether the task is waiting for the next idle tick.
+    /// Whether the task is waiting for the next polling tick.
     pub polling: bool,
 }
 
@@ -159,7 +159,7 @@ pub struct Executor {
     slots: [Slot; TASKS_PER_CORE],
     /// Bit per slot: poll me now.
     ready: AtomicU32,
-    /// Bit per slot: poll me after the next idle tick.
+    /// Bit per slot: poll me after the next polling tick.
     ///
     /// Stops a hardware-polling future from turning the run loop into a busy
     /// spin. See the [module documentation](super).
@@ -209,7 +209,7 @@ impl Executor {
         self.ready.load(Ordering::Relaxed)
     }
 
-    /// Bit per slot: tasks waiting for the next idle tick.
+    /// Bit per slot: tasks waiting for the next polling tick.
     pub fn polling_mask(&self) -> u32 {
         self.polling.load(Ordering::Relaxed)
     }
@@ -235,7 +235,7 @@ impl Executor {
         })
     }
 
-    /// Asks for `slot` to be polled again after the next idle tick.
+    /// Asks for `slot` to be polled again after the next polling tick.
     ///
     /// The back end of [`poll_again`](super::poll_again). Unlike
     /// [`wake_slot`](Self::wake_slot) it does *not* `sev`: the core is meant
@@ -346,8 +346,17 @@ impl Executor {
 
     /// Runs this core's tasks forever.
     fn run_loop(&self) -> ! {
+        let mut last_tick = time::ticks();
         loop {
             self.poll_ready();
+
+            // Ready tasks can keep yielding forever without an idle round.
+            // Give deadlines and hardware pollers the same cadence while busy.
+            let now = time::ticks();
+            if now.wrapping_sub(last_tick) >= cpu::EVENT_STREAM_PERIOD_TICKS {
+                self.promote_polling();
+                last_tick = now;
+            }
 
             if self.ready.load(Ordering::Acquire) != 0 {
                 // A wake landed while polling; go round again rather than
@@ -356,12 +365,15 @@ impl Executor {
             }
 
             self.idle();
+            self.promote_polling();
+            last_tick = time::ticks();
+        }
+    }
 
-            // Give the pollers their turn.
-            let pending = self.polling.swap(0, Ordering::AcqRel);
-            if pending != 0 {
-                self.ready.fetch_or(pending, Ordering::Release);
-            }
+    fn promote_polling(&self) {
+        let pending = self.polling.swap(0, Ordering::AcqRel);
+        if pending != 0 {
+            self.ready.fetch_or(pending, Ordering::Release);
         }
     }
 }

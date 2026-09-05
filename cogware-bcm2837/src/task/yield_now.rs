@@ -9,12 +9,15 @@ use core::{
 
 use super::executor;
 
-/// Requests one more poll of the current task after the next idle tick.
+/// Requests one more poll of the current task after the next polling tick.
 ///
 /// The primitive for a future waiting on hardware with no interrupt to
 /// announce it — a UART receive FIFO, a mailbox status bit, a deadline on the
 /// generic timer. It is what lets the core sleep in `wfe` between polls
 /// instead of spinning.
+///
+/// Polling also progresses while other tasks keep the core busy, once per
+/// architectural event-stream period.
 ///
 /// Call from inside a [`Future::poll`] implementation, immediately before
 /// returning [`Poll::Pending`]. From an `async fn`, `await` [`next_tick`]
@@ -84,9 +87,10 @@ impl Future for NextTick {
     }
 }
 
-/// Sleeps until the executor's next idle tick.
+/// Waits until the executor's next polling tick.
 ///
-/// The core parks in `wfe` in the meantime. The tick rate is set by the
+/// An otherwise idle core parks in `wfe` in the meantime. Busy cores service
+/// pollers at the same cadence without sleeping. The tick rate is set by the
 /// generic timer's event stream — see
 /// [`crate::arch::cpu::enable_event_stream`] — making this the cheapest way
 /// for an `async fn` to poll hardware in a loop:

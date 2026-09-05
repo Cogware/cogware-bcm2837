@@ -12,6 +12,12 @@ have connected for the console.
 
 About five seconds, and the card never leaves the board.
 
+**Payload compatibility:** current BSP payloads automatically reserve the
+loader's one-page secondary park area, including single-core kernels that
+allocate without ever releasing the other cores. Older or foreign payloads
+must understand the register handoff below or release **all** secondaries
+before allocating memory that could overwrite their park code.
+
 The idea comes from tutorial 06 of
 [rust-raspberrypi-OS-tutorials](https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/tree/master/06_uart_chainloader),
 and the wire protocol here is deliberately byte-identical to that project's
@@ -29,32 +35,35 @@ different, for reasons in §2.
   VideoCore reads config.txt, copies kernel8.img (the loader) to 0x80000
      │
      ▼
-  loader boots: MMU on, PL011 up, cores 1-3 released and re-parked  (§4)
+  loader boots: MMU on, PL011 up, firmware RAM bounds checked       (§4)
      │
      ▼
-  loader copies its relocation stub to 0x800000                     (§2)
+  loader brings cores 1-3 into this image, then reserves handover RAM
+  and installs the stub above the 16 MiB kernel window              (§2)
+     │
+     ▼
+  all three secondaries acknowledge from the relocated park loop   (§4)
      │
      ▼
   loader prints "\x03\x03\x03"  ─────────────────────────►  host starts sending
      │                                                              │
      ▼                                                              ▼
   loader reads a u32 length, replies "OK", stores the        host sends length,
-  payload at 0x1000000                                       waits for OK, sends
+  payload in the reserved staging buffer                    waits for OK, sends
      │                                                       the image
      ▼
   loader cleans the caches, drops the MMU, branches to the stub     (§3)
      │
      ▼
-  stub copies 0x1000000 -> 0x80000 and branches to 0x80000
+  stub copies staging -> 0x80000 and branches to 0x80000
      │
      ▼
-  the payload boots, exactly as if the firmware had loaded it
+  the payload boots and reserves the page described in x4-x6
 ```
 
-From the payload's point of view nothing unusual happened: it is at `0x80000`,
-in EL1, MMU off, caches cold, with the same register state the firmware
-provides. That is the whole objective — a kernel must not need to know it was
-chain-loaded.
+The payload enters at `0x80000`, in EL1, MMU off, caches cold. The firmware
+register ABI in x0-x3 is unchanged; x4-x6 carry a versioned parked-page
+descriptor. Secondary startup uses the usual spin table.
 
 ---
 
@@ -72,18 +81,105 @@ Cargo cannot give one example of a crate different link arguments from its
 siblings without splitting the crate. Not worth it for one example.
 
 So this implementation moves the *smallest possible* piece instead. Only the
-final copy loop has to run outside `0x80000`, and that loop is 132 bytes of
-position-independent assembly:
+final copy loop has to run outside `0x80000`. It and the secondary park loop
+are position-independent assembly, copied into an exclusive heap allocation:
 
 | Constant | Value | Role |
 | --- | --- | --- |
-| `STUB_ADDR` | `0x0080_0000` (8 MiB) | where the stub is relocated to |
-| `STAGING_ADDR` | `0x0100_0000` (16 MiB) | where the payload is received |
-| `MAX_PAYLOAD` | 8 MiB | staging to just below the heap |
+| `HANDOVER_ALIGN` / `HANDOVER_BYTES` | `mmu::FINE_WINDOW_END` (16 MiB) | allocation size and alignment |
+| reservation base | allocated, at least 16 MiB | relocated stub |
+| `ACK_OFFSET` | end of the first 4 KiB page, minus four cache lines | one park flag per core |
+| `STAGING_OFFSET` | 4 KiB after the reservation base | received payload |
+| `MAX_PAYLOAD` | 8 MiB | unchanged wire-protocol limit |
 
-Both sit well above the loader's own image and below the heap, so nothing
-overlaps. `install_stub()` copies the stub with
-`copy_nonoverlapping` and cleans the destination to the point of coherency.
+An earlier fixed stub at 8 MiB overlapped valid payloads: an 8 MiB image
+loaded at `0x80000` ends at `0x880000`, not `0x800000`. Moving just past that
+end is still insufficient: the incoming kernel's NOLOAD BSS and stacks can
+extend to the linker's 16 MiB ceiling and would erase a park loop below it.
+
+The reservation now lies outside that **complete kernel window**, not merely
+outside the file. It is obtained from the existing heap, not an unreserved
+physical address, and is retained until handover. Before allocation or copying,
+the loader requires a successful firmware memory probe and checks it against
+the mapped heap. Allocation failure, insufficient ARM RAM, a grown stub that
+would hit its flags, and arithmetic overflow are errors, not permission to
+continue. Normally the reservation is `0x01000000..0x02000000` and staging
+starts at `0x01001000`, but code uses the returned address.
+
+Compile-time regressions exercise the old 8 MiB address, a kernel ending
+exactly at 16 MiB, one-byte-short RAM bounds, oversized code and overflowing
+addresses. `install_stub()` copies only after these runtime invariants hold,
+then cleans the instructions and initialised flags to the point of coherency.
+The final partial copy word is explicitly zero-padded within the reservation.
+
+### Reservation lifetime: persistent handoff
+
+Payloads use the BSP's linker contract (`kernel_end <= 16 MiB`), but that alone
+does not preserve the park loop. The payload starts a fresh heap and does not
+inherit the loader's allocation metadata. Without an explicit reservation a
+16 MiB-aligned allocation can return `0x01000000` while secondaries are still
+executing there.
+
+The relocated stub therefore passes this **version-1 entry-register protocol**:
+
+| Register | Value |
+| --- | --- |
+| x0-x3 | unchanged firmware ABI (zero in this loader) |
+| x4 | `memory::CHAINLOAD_MAGIC = 0x4347434841494e31` (`CGCHAIN1`) |
+| x5 | physical base of the relocated stub/park page |
+| x6 | `memory::CHAINLOAD_PAGE_BYTES = 4096`, the exact reserved length |
+
+`_start` preserves x4-x6 in x21-x23 before scratch work or cache walkers and
+forwards them only to the primary Rust boot path, after BSS has been cleared.
+Before enabling any allocation, that path checks the magic, checked address
+arithmetic, exact length, page alignment, and a base at or above the 16 MiB
+kernel window. It also requires successful firmware ARM and VideoCore memory
+probes and bounds the whole page by both confirmed ARM RAM and the mapped heap.
+It never dereferences the descriptor. Unknown magic keeps the ordinary boot
+path; recognised magic with an invalid descriptor reports an error and halts
+with the heap disabled rather than silently discarding the reservation.
+
+The heap permanently excludes this page from **both bump allocations and
+alignment-padding free-list donation**. `heap::Stats::reserved_range` reports
+it, and capacity/untouched accounting subtracts it. This remains true whether
+the payload starts all cores, starts them after allocating, or never starts
+them. The exclusion is one page, not the loader's entire 16 MiB allocation:
+the staging buffer is free to reuse once the copy has finished. No low-memory
+firmware scratch region is borrowed, no RAM ceiling is reduced to 16 MiB, and
+no executable mapping is added to the payload's page tables.
+
+When another chain-loader is the payload, its fresh heap retains the previous
+park page. It brings all cores into its own image before allocating its next
+handover area. The following payload reserves only the new page, since the
+old one is no longer executing.
+
+### Older or foreign payloads
+
+A payload with an older BSP or a custom allocator that ignores x4-x6 does not
+get this reservation automatically. It must implement the same exclusion, or
+use this legacy startup order **before any allocation**:
+
+```rust
+// SAFETY: core 0, MMU and console ready, shared startup state initialised;
+// call exactly once.
+unsafe { smp::start_secondaries() };
+if smp::wait_for_cores(memory::CORE_COUNT, 1_000_000) != memory::CORE_COUNT {
+    // Report the error and stop; do not allocate after a timeout.
+    cpu::halt();
+}
+// Heap use is now permitted: every core has left the loader's park code.
+```
+
+`start_secondaries()` alone is not sufficient; release is asynchronous.
+`wait_for_cores()` observes the payload's `mark_online()` calls, which happen
+after those cores enter the payload, enable its MMU and leave the old park
+code behind. Secondary entry points must likewise avoid allocations until
+the primary has confirmed all cores online and published permission to them.
+If such a payload never starts its secondaries and does not implement the
+reservation, it must not allocate from their parked page. The serial protocol
+still transfers a flat image; it cannot establish whether foreign machine
+code honours this entry ABI. This compatibility restriction does not apply
+to the current BSP's boot and heap paths.
 
 The stub must remain position-independent. A literal pool or an `adrp` fixup
 would reference the original link address and read from the wrong place after
@@ -93,10 +189,10 @@ relocation. Verify with:
 aarch64-none-elf-objdump -d --start-address=0x... chainloader
 ```
 
-Every branch in it is PC-relative (`b`, `cbz`), the one absolute value it needs
-(`0x80000`) is built with `movz`, and it touches no memory it did not compute
-itself. It also never touches the stack, because by the time it runs there is
-no guaranteed stack left.
+Its internal branches and the `adr` forming its relocated page base are
+PC-relative; the fixed entry address and marker are built with `movz`/`movk`.
+It also never touches the stack, because by the time it runs there is no
+guaranteed stack left.
 
 ---
 
@@ -107,7 +203,7 @@ All three look like a hang with no output.
 ### W^X makes the stub unexecutable
 
 The MMU maps DRAM outside `.text` as **execute-never**
-([03-memory-and-mmu.md](03-memory-and-mmu.md)). `0x800000` is data as far as
+([03-memory-and-mmu.md](03-memory-and-mmu.md)). The reservation is data as far as
 the page tables are concerned, so branching to the stub takes an instruction
 permission fault *before* the stub's own first instruction — including the
 instruction that would have turned the MMU off. The MMU must therefore be
@@ -120,37 +216,17 @@ broken. The moment `SCTLR_EL1.C` clears, loads and stores bypass the caches and
 go to DRAM, but the caller's live stack frame is still sitting dirty in a cache
 line that has not been written back. The function returns to a garbage address.
 
-There is no way to write this safely as two steps, so it is one:
+There is no safe split between the **last clean** and the branch. The
+`__chainload_leave` assembly entry masks exceptions, preserves the destination
+and arguments in `x19..x22`, and calls the existing stack-free cache walker.
+It then clears `SCTLR_EL1.M/C/I`, invalidates the TLB and branches using only
+registers. There is no return to Rust, stack access or stack-writing helper
+between the final clean and the branch. Calling a Rust cleanup helper and then
+another Rust handover helper could otherwise dirty a new stack frame after
+the supposedly final clean.
 
-```rust
-unsafe fn leave_mmu_and_branch(target: usize, x0: usize, x1: usize, x2: usize) -> ! {
-    // Clear M/C/I and branch, with nothing in between that touches memory.
-    asm!(
-        "dsb sy",
-        "isb",
-        "mrs x9, sctlr_el1",
-        "bic x9, x9, #(1 << 0)",    // M: address translation
-        "bic x9, x9, #(1 << 2)",    // C: data cache
-        "bic x9, x9, #(1 << 12)",   // I: instruction cache
-        "msr sctlr_el1, x9",
-        "isb",
-        "tlbi vmalle1",
-        "dsb sy",
-        "isb",
-        "br  x4",
-        in("x4") target, in("x0") x0, in("x1") x1, in("x2") x2,
-        options(noreturn)
-    )
-}
-```
-
-Two constraints that the compiler enforces in unhelpful ways:
-
-* `out("x9") _` is rejected with `options(noreturn)` — the block never returns,
-  so there is no point at which a clobber could be observed. `x9` is a caller-
-  saved scratch register and nothing after this block runs.
-* `in(reg)` lets the register allocator pick, and it may well pick `x9` — which
-  the `mrs` immediately destroys. `target` is therefore pinned to `x4`.
+The walker clobbers `x0..x11`, `x16` and `x17`; the saved registers are outside
+that set. Disassembling `__chainload_leave` is part of handover verification.
 
 Everything that must survive is flushed to the point of coherency before this
 runs -- but "everything" is a larger set than it first appears, which is the
@@ -177,17 +253,17 @@ stale line from the *loader* would land on top of the payload's code.
 
 The fix is to clean before disabling, not merely disable:
 
-```rust
-// Core 0, immediately before dropping the MMU. Safe to walk the shared L2
-// here, because the secondaries are already parked with their caches off.
-unsafe { mmu::clean_invalidate_all() };
-```
+`__chainload_leave` calls `__dcache_clean_invalidate_all` on core 0,
+**after all three park acknowledgements**, so walking the shared L2 is safe.
+On a secondary it calls `__dcache_clean_invalidate_l1`: L1 is private, while
+core 0 is still using the shared L2. Both choices happen inside the assembly
+handover, before the MMU is disabled.
 
-```rust
-// Each secondary, before it parks with its cache off. L1 only -- core 0 is
-// still running, and the L2 is shared.
-unsafe { mmu::clean_invalidate_l1() };
-```
+The walker executes `DSB SY` before **each** cache level: the first drains
+preceding stores, and subsequent barriers complete inner-level writebacks
+before the outer cache is visited. Its final `DSB SY` completes the last level
+before cache shutdown. A final barrier alone cannot prevent late stores or
+inner-level writebacks from dirtying a cache line that has already been cleaned.
 
 `cache.s` provides four entry points over one shared walk. The distinction that
 matters is *clean* versus *invalidate*: the invalidate-only variants
@@ -224,6 +300,9 @@ __chainload_park:
     and     x6, x6, #3
     str     xzr, [x5, x6, lsl #3]   // clear our own slot first
     dsb     sy
+    stlr    x6, [x0]               // acknowledge from relocated, uncached code
+    dsb     sy
+    sev
 1:  wfe
     ldr     x4, [x5, x6, lsl #3]
     cbz     x4, 1b
@@ -233,6 +312,17 @@ __chainload_park:
 Clearing the slot before waiting is not optional. A slot left holding the
 loader's `_start` sends the core straight back into an image that is in the
 middle of being overwritten.
+
+Nor is an acknowledgement from the loader's Rust secondary entry sufficient:
+that core could still be executing loader code or cleaning its cache when
+core 0 starts overwriting it. The acknowledgement now comes from the
+relocated assembly, **after** cache/MMU shutdown and spin-slot clearing.
+Each core has a separate cache line; core 0 evicts its clean cached copy
+before reading the flag written by a cache-disabled secondary.
+
+All three acknowledgements are mandatory. Startup or parking timeout prints
+an error and stops **before advertising readiness or copying a payload**;
+zero parked cores is not treated as an acceptable hardware fallback.
 
 The payload is then released by its own `start_secondaries()`, through the
 normal path, and behaviour is identical on QEMU and hardware.
@@ -398,9 +488,13 @@ Builds loader and payload, starts QEMU, pushes:
 ```powershell
 .\scripts\chainboot-qemu.ps1 -Payload multicore
 .\scripts\chainboot-qemu.ps1 -Payload hello-uart -RunSeconds 15
+# Regression: the full 8 MiB file crosses the old stub, and all cores survive.
+.\scripts\chainboot-qemu.ps1 -Payload multicore -PadToMax -RunSeconds 10 `
+    -Expect 'All 4 cores online'
 ```
 
-It starts QEMU with `-serial tcp::5555,server=on,wait=on`. **`wait=on` is
+It binds the serial listener to loopback only, using
+`-serial tcp:127.0.0.1:4444,server=on,wait=on` by default. **`wait=on` is
 required**: with `wait=off` the guest runs immediately and everything printed
 before the host connects is discarded — including the `ETX` token, so the push
 never starts and it looks like a hang.
@@ -412,7 +506,16 @@ The same thing on Linux:
 ```bash
 ./scripts/chainboot-qemu.sh --payload multicore
 ./scripts/chainboot-qemu.sh --payload hello-uart --run-seconds 15 --log boot.log
+./scripts/chainboot-qemu.sh --payload multicore --pad-to-max --run-seconds 10 \
+    --expect 'All 4 cores online'
 ```
+
+`--pad-to-max` / `-PadToMax` creates and cleans up a private padded copy under
+`target/`; the original image is untouched. It also checks receipt of all
+8,388,608 bytes. `--expect` / `-Expect` turns missing payload output into a
+non-zero exit status, rather than allowing a hung payload to pass after the
+capture timeout. A transcript is retained under `target/` unless `--log` /
+`-LogPath` names another destination.
 
 It builds the payload by calling `chainboot.sh --build-only`, so feature
 resolution and `objcopy` discovery live in exactly one place. Because `wait=on`
@@ -422,6 +525,45 @@ listening socket with `ss` rather than connecting to probe.
 Remember what this does not test: QEMU treats set/way cache maintenance as a
 no-op and has no store buffer to leave dirty, so a loader that passes here can
 still corrupt the handover on real silicon (§3).
+
+### BSS/stack-boundary and persistent-reservation regressions
+
+The standalone fixture `scripts/fixtures/chainload-large-bss.rs` reserves
+14 MiB of NOLOAD BSS. Its flat image stays small, but boot clears through the
+old 8 MiB parking address. **Before releasing any secondary**, it checks the
+reservation and performs two 16 MiB-aligned, 16 MiB-sized allocations plus
+smaller allocations, writing both ends of each returned block. This advances
+the bump pointer past the parked page and exercises free-list donation of the
+skipped alignment padding. It verifies the parked instructions and heap
+accounting remain intact, then releases all four cores. It needs no manifest
+entry or additional crate:
+
+```bash
+cargo build --release --lib
+rustc --edition=2024 --target=aarch64-unknown-none -C panic=abort \
+    -C relocation-model=static -C link-arg=-Tcogware-bcm2837/link.ld \
+    -L dependency=target/aarch64-unknown-none/release/deps \
+    --extern cogware_bcm2837=target/aarch64-unknown-none/release/libcogware_bcm2837.rlib \
+    scripts/fixtures/chainload-large-bss.rs -o target/chainload-large-bss
+aarch64-none-elf-objcopy -O binary target/chainload-large-bss target/chainload-large-bss.img
+./scripts/chainboot-qemu.sh --payload target/chainload-large-bss.img \
+    --run-seconds 10 --expect 'Large-BSS: all 4 cores online'
+```
+
+Use the corresponding PowerShell script with `-Payload`, `-RunSeconds` and
+`-Expect` on Windows. `llvm-objcopy` can replace the GNU objcopy command.
+
+For the allocating **single-core** case, repeat the `rustc` command with
+`--cfg chainload_single_core` and a different output path, convert that image,
+and run with `--expect 'Single-core heap before release: PASS'`. This variant
+halts after the workload without ever releasing a secondary. The ordinary
+variant prints the same pre-release success marker, then
+`Large-BSS: all 4 cores online after heap use`.
+
+The private descriptor validator and bump-address helper also have compile-time
+boundary regressions, exercised by every library build: unknown markers,
+wrong/unaligned/overflowing descriptors, firmware limits, and allocations
+ending before, starting inside, or skipping past the reserved page.
 
 ---
 
@@ -490,8 +632,10 @@ Two things to know:
 | Push starts, target then hangs | payload was an ELF — rebuild with `cargo image --example <name> -- -O binary kernel8.img` |
 | CRCs differ | serial corruption; drop the baud rate or shorten the cable |
 | Payload sees only one core | park loop is not clearing its spin-table slot (§4) |
-| Instruction abort near `0x800000` | MMU still on at the branch (§3) |
+| Instruction abort at the reported relocation address | MMU still on at the branch (§3) |
 | Return to a garbage address | D-cache cleared in a function that then returned (§3) |
+| Loader refuses handover memory | Firmware bounds unavailable or not enough mapped ARM RAM (§2) |
+| Loader reports secondary startup/parking timeout | A core has not safely left the image; no payload copy is attempted (§4) |
 
 ---
 

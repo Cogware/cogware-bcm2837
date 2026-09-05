@@ -34,16 +34,22 @@
 //! bytes, then set `ST` again for the read before the write drains. With `TA`
 //! still set the controller emits a repeated START rather than a STOP.
 //!
-//! [`I2c::write_read`] implements it. Losing the race yields a STOP then a
-//! fresh START, which most devices treat identically, so the failure mode is a
-//! slower transaction rather than wrong data. Devices that require an unbroken
-//! transaction should use the bit-banged bus.
+//! [`I2c::write_read`] implements it and returns [`Error::RepeatedStartLost`]
+//! if the write completes before the read is armed. It never silently
+//! substitutes STOP/START. QEMU currently completes writes synchronously and
+//! cannot model this chaining, so combined transfers fail there.
+//!
+//! The operation-list API coalesces adjacent same-direction buffers. BSC can
+//! chain a write phase into a final read, but cannot preserve the contract for
+//! a non-final read or an empty chained phase: those requests are rejected
+//! before touching the bus. Use the bit-banged bus for arbitrary sequences.
 #![allow(dead_code)]
 
 use super::mmio::{ReadWrite, RegisterBlock};
 use crate::{
     bsp::memory::map,
     drivers::{GPIO, gpio::Function},
+    hal::shared::{I2cOperation, I2cOperations, I2cPhase, i2c_phase},
 };
 
 /// The VideoCore core clock, which the BSC divides down to make `SCL`.
@@ -73,6 +79,17 @@ pub enum Error {
     Timeout,
     /// The transfer was longer than the 16-bit `DLEN` field allows.
     TooLong,
+    /// The BSC cannot chain this sequence without an intermediate STOP.
+    ///
+    /// Only a write phase followed by a final read phase is supported, and
+    /// both chained phases must contain data. An entirely empty read phase is
+    /// also rejected before bus activity.
+    UnsupportedTransaction,
+    /// The write ended before a repeated START could be confirmed.
+    ///
+    /// The write may already have reached the device. Do not blindly retry a
+    /// non-idempotent transaction. QEMU does not model BSC repeated START.
+    RepeatedStartLost,
 }
 
 // Control register bits.
@@ -123,6 +140,85 @@ pub struct I2c {
     sda: u8,
     scl: u8,
     initialised: bool,
+}
+
+fn phase_length(phase: &I2cPhase) -> Result<u16, Error> {
+    phase
+        .length
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or(Error::TooLong)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_registers(test: impl FnOnce(&mut I2c, &Registers)) {
+        // SAFETY: every field is a ReadWrite<u32>, for which zero is valid.
+        let registers: Registers = unsafe { core::mem::zeroed() };
+        let mut bus = I2c {
+            // SAFETY: these register cells outlive the unique driver used
+            // during this call and are never moved while it is alive.
+            block: unsafe { RegisterBlock::new(core::ptr::from_ref(&registers).addr()) },
+            sda: 2,
+            scl: 3,
+            initialised: true,
+        };
+        test(&mut bus, &registers);
+    }
+
+    #[test]
+    fn fifo_space_is_not_transfer_active() {
+        with_registers(|bus, registers| {
+            registers.s.write(S_TXD);
+            assert_eq!(bus.wait_active(), Err(Error::Timeout));
+            registers.s.write(S_TXD | S_TA);
+            assert_eq!(bus.wait_active(), Ok(()));
+            registers.s.write(S_TA | S_DONE);
+            assert_eq!(bus.wait_active(), Err(Error::RepeatedStartLost));
+        });
+    }
+
+    #[test]
+    fn unsupported_shapes_are_rejected_before_start() {
+        with_registers(|bus, registers| {
+            let mut read = [0; 1];
+            assert_eq!(
+                bus.transaction(
+                    0x50,
+                    &mut [I2cOperation::Read(&mut read), I2cOperation::Write(&[0]),]
+                ),
+                Err(Error::UnsupportedTransaction)
+            );
+            assert_eq!(registers.c.read(), 0);
+            assert_eq!(
+                bus.write_read(0x50, &[], &mut read),
+                Err(Error::UnsupportedTransaction)
+            );
+            assert_eq!(registers.c.read(), 0);
+            let bytes = [0; 65535];
+            assert_eq!(
+                bus.transaction(
+                    0x50,
+                    &mut [I2cOperation::Write(&bytes), I2cOperation::Write(&[0]),]
+                ),
+                Err(Error::TooLong)
+            );
+            assert_eq!(registers.c.read(), 0);
+            assert_eq!(bus.transaction(0x50, &mut []), Ok(()));
+            assert_eq!(registers.c.read(), 0);
+        });
+    }
+
+    #[test]
+    fn abort_does_not_issue_another_start() {
+        with_registers(|bus, registers| {
+            registers.c.write(C_I2CEN | C_ST | C_READ);
+            bus.abort();
+            assert_eq!(registers.c.read(), C_CLEAR);
+            assert_eq!(registers.c.read() & (C_I2CEN | C_ST), 0);
+        });
+    }
 }
 
 impl I2c {
@@ -240,146 +336,172 @@ impl I2c {
 
     /// Writes `data` to the device at seven-bit address `address`.
     pub fn write(&mut self, address: u8, data: &[u8]) -> Result<(), Error> {
-        let length = u16::try_from(data.len()).map_err(|_| Error::TooLong)?;
-
-        self.start(address, length, false);
-
-        let regs = self.block.regs();
-        let mut sent = 0usize;
-        let mut spins = 0u32;
-
-        loop {
-            let status = regs.s.read();
-            self.check(status)?;
-
-            if status & S_DONE != 0 {
-                break;
-            }
-
-            if status & S_TXD != 0 && sent < data.len() {
-                regs.fifo.write(u32::from(data[sent]));
-                sent += 1;
-                spins = 0;
-                continue;
-            }
-
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(Error::Timeout);
-            }
-            core::hint::spin_loop();
-        }
-
-        self.finish()
+        self.transaction(address, &mut [I2cOperation::Write(data)])
     }
 
     /// Reads `data.len()` bytes from the device at `address`.
     pub fn read(&mut self, address: u8, data: &mut [u8]) -> Result<(), Error> {
-        let length = u16::try_from(data.len()).map_err(|_| Error::TooLong)?;
-
-        self.start(address, length, true);
-
-        let regs = self.block.regs();
-        let mut received = 0usize;
-        let mut spins = 0u32;
-
-        loop {
-            let status = regs.s.read();
-            self.check(status)?;
-
-            if status & S_RXD != 0 && received < data.len() {
-                data[received] = (regs.fifo.read() & 0xFF) as u8;
-                received += 1;
-                spins = 0;
-                continue;
-            }
-
-            if status & S_DONE != 0 && received >= data.len() {
-                break;
-            }
-
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(Error::Timeout);
-            }
-            core::hint::spin_loop();
-        }
-
-        self.finish()
+        self.transaction(address, &mut [I2cOperation::Read(data)])
     }
 
-    /// Writes `write`, then reads `read`, ideally without releasing the bus.
+    /// Writes `write`, then reads `read`, without an intermediate STOP.
     ///
     /// The "read register N" shape most sensors use. See the module docs for
     /// how the repeated START is produced and the race it depends on.
     pub fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
-        if write.is_empty() {
-            return self.read(address, read);
+        self.transaction(
+            address,
+            &mut [I2cOperation::Write(write), I2cOperation::Read(read)],
+        )
+    }
+
+    /// Executes a complete operation list without allocating.
+    ///
+    /// Adjacent same-direction buffers are one phase, with one address and
+    /// one total `DLEN` (at most 65535 bytes). A write may precede a final read.
+    /// Other direction sequences and empty chained phases are rejected before
+    /// START; arbitrary sequences are supported by [`crate::hal::bitbang::I2c`].
+    /// A read phase must contain at least one byte.
+    pub fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
         }
-        if read.is_empty() {
-            return self.write(address, write);
+        let first = i2c_phase(operations, 0);
+        let first_length = phase_length(&first)?;
+        if first.read && first_length == 0 {
+            return Err(Error::UnsupportedTransaction);
         }
+        let second = if first.end < operations.len() {
+            let second = i2c_phase(operations, first.end);
+            let second_length = phase_length(&second)?;
+            if first.read
+                || second.end != operations.len()
+                || first_length == 0
+                || second_length == 0
+            {
+                return Err(Error::UnsupportedTransaction);
+            }
+            Some((second, second_length))
+        } else {
+            None
+        };
 
-        let write_len = u16::try_from(write.len()).map_err(|_| Error::TooLong)?;
-        let read_len = u16::try_from(read.len()).map_err(|_| Error::TooLong)?;
+        self.start(address, first_length, first.read);
+        let result = (|| {
+            if second.is_some() {
+                // TXD only means FIFO space, not that START/address completed.
+                // Broadcom's combined-transfer sequence requires TA first.
+                self.wait_active()?;
+            }
+            self.transfer_phase(operations, 0, &first)?;
+            if let Some((second, length)) = second {
+                let regs = self.block.regs();
+                let status = regs.s.read();
+                self.check(status)?;
+                if status & (S_TA | S_DONE) != S_TA {
+                    return Err(Error::RepeatedStartLost);
+                }
+                regs.dlen.write(u32::from(length));
+                regs.c.write(C_I2CEN | C_ST | C_READ);
 
-        // Do not prefill the FIFO: the read phase must be armed while `TA` is
-        // still set, and prefilling lets the write finish first.
-        self.start(address, write_len, false);
+                // DONE is sticky. Do not clear it between phases: it catches
+                // a STOP in the window between the TA check and the ST write.
+                // An unusually fast completed read is conservatively rejected.
+                let status = regs.s.read();
+                self.check(status)?;
+                if status & S_DONE != 0 {
+                    return Err(Error::RepeatedStartLost);
+                }
+                self.transfer_phase(operations, first.end, &second)?;
+            }
+            self.wait_done()?;
+            self.finish()
+        })();
+        if result.is_err() {
+            self.abort();
+        }
+        result
+    }
 
+    fn transfer_phase(
+        &self,
+        operations: &mut (impl I2cOperations + ?Sized),
+        start: usize,
+        phase: &I2cPhase,
+    ) -> Result<(), Error> {
+        for index in start..phase.end {
+            match operations.operation(index) {
+                I2cOperation::Write(bytes) => {
+                    for &byte in bytes {
+                        self.wait_fifo(S_TXD)?;
+                        self.block.regs().fifo.write(u32::from(byte));
+                    }
+                }
+                I2cOperation::Read(bytes) => {
+                    for byte in bytes {
+                        self.wait_fifo(S_RXD)?;
+                        *byte = self.block.regs().fifo.read() as u8;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_active(&self) -> Result<(), Error> {
+        for _ in 0..POLL_LIMIT {
+            let status = self.block.regs().s.read();
+            self.check(status)?;
+            if status & S_DONE != 0 {
+                return Err(Error::RepeatedStartLost);
+            }
+            if status & S_TA != 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(Error::Timeout)
+    }
+
+    fn wait_fifo(&self, ready: u32) -> Result<(), Error> {
+        for _ in 0..POLL_LIMIT {
+            let status = self.block.regs().s.read();
+            self.check(status)?;
+            // Reads may still have bytes in the FIFO after DONE.
+            if status & ready != 0 && (ready == S_RXD || status & S_DONE == 0) {
+                return Ok(());
+            }
+            if status & S_DONE != 0 {
+                return Err(Error::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+        Err(Error::Timeout)
+    }
+
+    fn wait_done(&self) -> Result<(), Error> {
+        for _ in 0..POLL_LIMIT {
+            let status = self.block.regs().s.read();
+            self.check(status)?;
+            if status & S_DONE != 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(Error::Timeout)
+    }
+
+    fn abort(&mut self) {
         let regs = self.block.regs();
-        let mut sent = 0usize;
-        let mut spins = 0u32;
-
-        while sent < write.len() {
-            let status = regs.s.read();
-            self.check(status)?;
-
-            if status & S_TXD != 0 {
-                regs.fifo.write(u32::from(write[sent]));
-                sent += 1;
-                spins = 0;
-                continue;
-            }
-
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(Error::Timeout);
-            }
-            core::hint::spin_loop();
-        }
-
-        // Arm the read while the write is still draining. `TA` still set means
-        // the controller emits Sr rather than P.
-        regs.dlen.write(u32::from(read_len));
-        regs.c.write(C_I2CEN | C_ST | C_READ);
-
-        let mut received = 0usize;
-        spins = 0;
-
-        loop {
-            let status = regs.s.read();
-            self.check(status)?;
-
-            if status & S_RXD != 0 && received < read.len() {
-                read[received] = (regs.fifo.read() & 0xFF) as u8;
-                received += 1;
-                spins = 0;
-                continue;
-            }
-
-            if status & S_DONE != 0 && received >= read.len() {
-                break;
-            }
-
-            spins += 1;
-            if spins > POLL_LIMIT {
-                return Err(Error::Timeout);
-            }
-            core::hint::spin_loop();
-        }
-
-        self.finish()
+        // Disable before clearing, without I2CEN/ST: this must not start a
+        // new frame to the old address (including under QEMU).
+        regs.c.write(0);
+        regs.c.write(C_CLEAR);
+        regs.s.write(S_CLEAR_ALL);
     }
 
     /// Reports whether anything answers at `address`.
@@ -427,13 +549,12 @@ impl I2c {
     /// Turns the sticky error bits into an [`Error`].
     fn check(&self, status: u32) -> Result<(), Error> {
         if status & S_ERR != 0 {
-            self.block.regs().s.write(S_CLEAR_ALL);
             return Err(Error::Nack);
         }
         if status & S_CLKT != 0 {
-            self.block.regs().s.write(S_CLEAR_ALL);
             return Err(Error::ClockTimeout);
         }
+
         Ok(())
     }
 

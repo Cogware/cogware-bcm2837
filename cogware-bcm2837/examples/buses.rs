@@ -25,10 +25,10 @@
 //!
 //! # The repeated-START caveat
 //!
-//! QEMU's I2C core does not model repeated START. `write_read` degrades to
-//! STOP-then-START there, which these devices answer identically, so the read
-//! is still correct. On real silicon the repeated START happens and the bus is
-//! never released.
+//! QEMU's I2C core does not model repeated START. Strict `write_read` reports
+//! `RepeatedStartLost`; the demo checks that rather than silently accepting
+//! STOP/START. DS1338 and TMP105 retain their register pointers across STOP,
+//! so their device-specific demo code explicitly uses separate transfers.
 
 #![no_std]
 #![no_main]
@@ -43,7 +43,7 @@ use cogware_bcm2837::{
         spi::{self, ChipSelect, Config, MODE_0},
     },
     entry,
-    hal::shared::{I2cDevice, SharedI2c},
+    hal::shared::{I2cDevice, NoCs, SharedI2c, SpiDevice},
     print, println, smp,
     sync::{Barrier, SpinLock},
     time,
@@ -168,14 +168,15 @@ fn i2c_demo() -> bool {
     read_clock();
     nvram_round_trip();
     read_sensor();
+    i2c_contract_checks();
 
     true
 }
 
-/// A register read: write the register number, repeated START, read.
+/// DS1338 accepts STOP between register selection and reading.
 fn read_clock() {
     let mut time_regs = [0u8; 7];
-    let result = I2C1.with(|bus| bus.write_read(RTC, &[0x00], &mut time_regs));
+    let result = I2C1.with(|bus| read_registers(bus, RTC, 0x00, &mut time_regs));
 
     println!();
     println!("  DS1338 @ {RTC:#04x} (real-time clock)");
@@ -213,7 +214,7 @@ fn nvram_round_trip() {
         bus.write(RTC, &frame)
     });
 
-    let read = I2C1.with(|bus| bus.write_read(RTC, &[ADDRESS], &mut buffer));
+    let read = I2C1.with(|bus| read_registers(bus, RTC, ADDRESS, &mut buffer));
 
     let ok = written.is_ok() && read.is_ok() && buffer == PAYLOAD;
 
@@ -226,7 +227,7 @@ fn nvram_round_trip() {
 /// A second device on the same bus, to show addressing selects.
 fn read_sensor() {
     let mut raw = [0u8; 2];
-    let result = I2C1.with(|bus| bus.write_read(SENSOR, &[0x00], &mut raw));
+    let result = I2C1.with(|bus| read_registers(bus, SENSOR, 0x00, &mut raw));
 
     println!();
     println!("  TMP105 @ {SENSOR:#04x} (temperature sensor)");
@@ -246,6 +247,70 @@ fn read_sensor() {
 // ---------------------------------------------------------------------------
 // SPI
 // ---------------------------------------------------------------------------
+
+/// These particular devices retain their register pointer across STOP.
+/// This is an explicit device-level choice, not an I2C transaction fallback.
+fn read_registers(
+    bus: &mut i2c::I2c,
+    address: u8,
+    register: u8,
+    data: &mut [u8],
+) -> Result<(), i2c::Error> {
+    bus.write(address, &[register])?;
+    bus.read(address, data)
+}
+
+fn i2c_contract_checks() {
+    use embedded_hal::i2c::{I2c, Operation};
+    let (mut first, mut second) = ([0; 1], [0; 1]);
+    let result = I2C1.with(|bus| {
+        I2c::transaction(
+            bus,
+            RTC,
+            &mut [
+                Operation::Write(&[0x24]),
+                Operation::Write(&[0xC1]),
+                Operation::Write(&[0xC2]),
+            ],
+        )?;
+        bus.write(RTC, &[0x24])?;
+        I2c::transaction(
+            bus,
+            RTC,
+            &mut [Operation::Read(&mut first), Operation::Read(&mut second)],
+        )
+    });
+    println!(
+        "  scatter W/W/W and R/R: {}",
+        verdict(result.is_ok() && first == [0xC1] && second == [0xC2])
+    );
+    let strict = I2C1.with(|bus| bus.write_read(RTC, &[0x24], &mut first));
+    match strict {
+        Ok(()) => println!("  strict repeated START: supported"),
+        Err(i2c::Error::RepeatedStartLost) => {
+            println!(
+                "  strict repeated START: unavailable (expected in QEMU); no silent STOP fallback"
+            );
+        }
+        Err(error) => println!("  strict repeated START: {error:?}"),
+    }
+    let unsupported = I2C1.with(|bus| {
+        I2c::transaction(
+            bus,
+            RTC,
+            &mut [Operation::Read(&mut first), Operation::Write(&[0x24])],
+        )
+    });
+    println!(
+        "  read-then-write rejected before START: {}",
+        verdict(unsupported == Err(i2c::Error::UnsupportedTransaction))
+    );
+    let recovered = I2C1.with(|bus| read_registers(bus, RTC, 0x24, &mut first));
+    println!(
+        "  I2C usable after rejected transaction: {}",
+        verdict(recovered.is_ok() && first == [0xC1])
+    );
+}
 
 fn spi_demo() {
     println!();
@@ -307,6 +372,39 @@ fn spi_demo() {
     println!(
         "  96-byte transfer (past the 64-byte FIFO): {}",
         verdict(bulk.is_ok())
+    );
+    let mut device = SpiDevice::new(&SPI0, NoCs);
+    let (mut maker, mut kind) = ([0; 1], [0; 2]);
+    let split = embedded_hal::spi::SpiDevice::transaction(
+        &mut device,
+        &mut [
+            embedded_hal::spi::Operation::Write(&[0x9F]),
+            embedded_hal::spi::Operation::DelayNs(1_000),
+            embedded_hal::spi::Operation::Read(&mut maker),
+            embedded_hal::spi::Operation::Read(&mut kind),
+        ],
+    );
+    let expected = [frame[1], frame[2], frame[3]];
+    println!(
+        "  hardware CS across write/delay/read/read: {}",
+        verdict(split.is_ok() && [maker[0], kind[0], kind[1]] == expected,)
+    );
+    let injected = device.transaction(|bus| {
+        // QEMU's SPI model does not wire CS to its slave. Complete the reply
+        // before injecting an error so its parser is not left mid-command.
+        // Driver unit tests independently inspect TA through error cleanup.
+        let mut response = [0; 3];
+        bus.write(&[0x9F])?;
+        bus.read(&mut response)?;
+        Err::<(), _>(spi::Error::Timeout)
+    });
+    let mut recovered = [0x9F, 0, 0, 0];
+    let result = device.transfer_in_place(&mut recovered);
+    println!(
+        "  hardware CS released after transaction error: {}",
+        verdict(
+            injected == Err(spi::Error::Timeout) && result.is_ok() && recovered[1..] == expected,
+        )
     );
 }
 
@@ -370,7 +468,10 @@ fn hammer_bus(core: usize) {
         }
 
         let mut back = [0u8; 1];
-        if device.write_read(&[address], &mut back).is_err() {
+        if device
+            .transaction(|bus| read_registers(bus, RTC, address, &mut back))
+            .is_err()
+        {
             continue;
         }
 
@@ -418,7 +519,11 @@ impl<I2C: embedded_hal::i2c::I2c> Ds1338<I2C> {
 
     fn seconds(&mut self) -> Result<u8, I2C::Error> {
         let mut raw = [0u8; 1];
-        self.i2c.write_read(RTC, &[0x00], &mut raw)?;
+        // DS1338 accepts STOP between register selection and the read. This
+        // demo runs before the multicore test; generic shared calls lock once
+        // per transaction, not across this pair.
+        self.i2c.write(RTC, &[0x00])?;
+        self.i2c.read(RTC, &mut raw)?;
 
         let bcd = raw[0] & 0x7F;
         Ok((bcd >> 4) * 10 + (bcd & 0x0F))

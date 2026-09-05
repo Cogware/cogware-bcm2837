@@ -21,8 +21,8 @@
 //! # Chip select
 //!
 //! The controller can drive `CE0`/`CE1` itself, asserting for the duration of
-//! each transfer. This needs no extra pins but limits to two devices and
-//! deasserts between the two halves of a write-then-read.
+//! each transfer, or across every transfer inside [`Spi0::transaction`].
+//! This needs no extra pins but limits selection to two devices.
 //!
 //! [`ChipSelect::None`] leaves both lines free for a GPIO-driven chip select,
 //! as [`crate::hal::shared::SpiDevice`] does: any number of devices, with chip
@@ -219,6 +219,67 @@ const _: () = assert!(core::mem::offset_of!(Registers, dc) == 0x14);
 pub struct Spi0 {
     block: RegisterBlock<Registers>,
     initialised: bool,
+    transaction_active: bool,
+}
+
+struct Transaction<'a>(&'a mut Spi0);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_registers(test: impl FnOnce(&mut Spi0, &Registers)) {
+        // SAFETY: every field is a ReadWrite<u32>; zero is a valid value.
+        let registers: Registers = unsafe { core::mem::zeroed() };
+        registers.cs.write(CS_TXD | CS_RXD | CS_DONE);
+        let mut bus = Spi0 {
+            // SAFETY: the register cells remain in place for this entire call,
+            // and this is the only driver accessing them.
+            block: unsafe { RegisterBlock::new(core::ptr::from_ref(&registers).addr()) },
+            initialised: true,
+            transaction_active: false,
+        };
+        test(&mut bus, &registers);
+    }
+
+    #[test]
+    fn ce1_polarity_does_not_change_ce0() {
+        with_registers(|bus, registers| {
+            bus.set_chip_select(ChipSelect::Ce1, true);
+            assert_ne!(registers.cs.read() & (1 << 22), 0);
+            assert_eq!(registers.cs.read() & (1 << 21), 0);
+            bus.set_chip_select(ChipSelect::Ce0, true);
+            bus.set_chip_select(ChipSelect::Ce1, false);
+            assert_eq!(registers.cs.read() & (1 << 22), 0);
+            assert_ne!(registers.cs.read() & (1 << 21), 0);
+        });
+    }
+
+    #[test]
+    fn transaction_holds_ta_until_error_cleanup() {
+        with_registers(|bus, registers| {
+            let result = bus.transaction(|bus| {
+                assert_ne!(registers.cs.read() & CS_TA, 0);
+                bus.write(&[0x12])?;
+                assert_ne!(registers.cs.read() & CS_TA, 0);
+                bus.transaction(|bus| bus.write(&[0x34]))?;
+                assert_ne!(registers.cs.read() & CS_TA, 0);
+                Err::<(), _>(Error::Timeout)
+            });
+            assert_eq!(result, Err(Error::Timeout));
+            assert_eq!(registers.cs.read() & CS_TA, 0);
+            assert!(!bus.transaction_active);
+            assert_eq!(bus.write(&[0x56]), Ok(()));
+            assert_eq!(registers.cs.read() & CS_TA, 0);
+        });
+    }
+}
+
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+        self.0.transaction_active = false;
+    }
 }
 
 impl Spi0 {
@@ -232,6 +293,7 @@ impl Spi0 {
         Self {
             block: unsafe { RegisterBlock::new(map::SPI0) },
             initialised: false,
+            transaction_active: false,
         }
     }
 
@@ -288,14 +350,15 @@ impl Spi0 {
     /// Selects which chip-enable line the controller drives, and its polarity.
     pub fn set_chip_select(&mut self, chip_select: ChipSelect, active_high: bool) {
         let mut bits = chip_select.bits();
+        let polarity = CS_CSPOL0 << bits;
         if active_high {
-            bits |= CS_CSPOL | CS_CSPOL0;
+            bits |= CS_CSPOL | polarity;
         }
 
         self.block
             .regs()
             .cs
-            .modify(|value| (value & !(CS_CS_MASK | CS_CSPOL | CS_CSPOL0)) | bits);
+            .modify(|value| (value & !(CS_CS_MASK | CS_CSPOL | polarity)) | bits);
     }
 
     /// Sets the bit clock as close to `speed_hz` as the divider allows, and
@@ -330,6 +393,21 @@ impl Spi0 {
         clock_from_divider(self.block.regs().clk.read() & 0xFFFF)
     }
 
+    /// Holds hardware chip select across every transfer and delay in `body`.
+    ///
+    /// Nested calls join the existing transaction. The outermost call always
+    /// releases the controller, including when the body returns an error.
+    /// Do not reconfigure the controller while a transaction is active.
+    pub fn transaction<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        if self.transaction_active {
+            return body(self);
+        }
+        self.begin();
+        self.transaction_active = true;
+        let transaction = Transaction(self);
+        body(transaction.0)
+    }
+
     /// Clocks `write` out and `read` in, simultaneously.
     ///
     /// The two slices may differ in length: the shorter one is padded, sending
@@ -341,9 +419,16 @@ impl Spi0 {
             return Ok(());
         }
 
-        self.begin()?;
-        let result = self.pump(read, write, length);
-        self.end();
+        let standalone = !self.transaction_active;
+        if standalone {
+            self.begin();
+        }
+        let result = self
+            .pump(read, write, length)
+            .and_then(|()| self.wait_done());
+        if standalone {
+            self.end();
+        }
         result
     }
 
@@ -363,7 +448,10 @@ impl Spi0 {
             return Ok(());
         }
 
-        self.begin()?;
+        let standalone = !self.transaction_active;
+        if standalone {
+            self.begin();
+        }
 
         let mut sent = 0;
         let mut received = 0;
@@ -389,36 +477,49 @@ impl Spi0 {
             } else {
                 spins += 1;
                 if spins > POLL_LIMIT {
-                    self.end();
+                    if standalone {
+                        self.end();
+                    }
                     return Err(Error::Timeout);
                 }
                 core::hint::spin_loop();
             }
         }
 
-        self.end();
-        Ok(())
+        let result = self.wait_done();
+        if standalone {
+            self.end();
+        }
+        result
     }
 
     /// Waits for the shift register to drain.
     ///
-    /// Every routine here already leaves the bus idle, so this is a no-op kept
-    /// for the `embedded-hal` `SpiBus::flush` contract.
+    /// Every transfer already waits for `DONE`, even inside a transaction.
     pub fn flush(&mut self) -> Result<(), Error> {
         Ok(())
     }
 
     /// Empties both FIFOs and asserts `TA`, starting a transfer.
-    fn begin(&mut self) -> Result<(), Error> {
+    fn begin(&mut self) {
         let regs = self.block.regs();
         regs.cs.modify(|value| {
-            (value & !(CS_DMAEN | CS_INTR | CS_INTD | CS_REN | CS_LEN))
+            (value & !(CS_DMAEN | CS_INTR | CS_INTD | CS_REN | CS_LEN | CS_ADCS))
                 | CS_CLEAR_TX
                 | CS_CLEAR_RX
                 | CS_DONE
         });
         regs.cs.modify(|value| value | CS_TA);
-        Ok(())
+    }
+
+    fn wait_done(&self) -> Result<(), Error> {
+        for _ in 0..POLL_LIMIT {
+            if self.block.regs().cs.read() & CS_DONE != 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(Error::Timeout)
     }
 
     /// Deasserts `TA` and clears the FIFOs, ending a transfer.

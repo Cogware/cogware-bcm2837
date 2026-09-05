@@ -225,6 +225,68 @@ impl fmt::Write for Pl011Uart {
     }
 }
 
+/// Diagnostic output which never borrows the shared driver or its counters.
+pub(crate) struct EmergencyWriter {
+    failed: bool,
+}
+
+impl EmergencyWriter {
+    pub(crate) fn new() -> Self {
+        Self { failed: false }
+    }
+
+    fn wait_clear(&mut self, mask: u32) -> fmt::Result {
+        if !self.failed {
+            for _ in 0..1_000_000 {
+                // SAFETY: FR is an aligned, read-only PL011 MMIO register,
+                // mapped even before the MMU is enabled. No driver RAM is read.
+                let flags = unsafe {
+                    RegisterBlock::<Registers>::read_raw(
+                        map::PL011_UART,
+                        core::mem::offset_of!(Registers, fr),
+                    )
+                };
+                if flags & mask == 0 {
+                    return Ok(());
+                }
+                core::hint::spin_loop();
+            }
+        }
+        self.failed = true;
+        Err(fmt::Error)
+    }
+
+    fn write_byte(&mut self, byte: u8) -> fmt::Result {
+        self.wait_clear(fr::TXFF)?;
+        // SAFETY: DR is aligned, mapped external MMIO. An emergency write can
+        // interleave with another transmitter, but cannot alias driver RAM.
+        unsafe {
+            RegisterBlock::<Registers>::write_raw(
+                map::PL011_UART,
+                core::mem::offset_of!(Registers, dr),
+                u32::from(byte),
+            )
+        };
+        Ok(())
+    }
+
+    pub(crate) fn flush(&mut self) -> fmt::Result {
+        self.wait_clear(fr::BUSY)
+    }
+}
+
+impl fmt::Write for EmergencyWriter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for byte in text.bytes() {
+            if byte == b'\n' {
+                self.write_byte(b'\r')?;
+            }
+            self.write_byte(byte)?;
+        }
+        Ok(())
+    }
+}
+
 // Divisor cross-checks against the worked examples in the PL011 TRM and the
 // values the Raspberry Pi firmware programs.
 const _: () = {

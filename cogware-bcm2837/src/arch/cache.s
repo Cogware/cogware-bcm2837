@@ -115,6 +115,7 @@ __dcache_clean_invalidate_l1:
     mov     w10, #0                     /* w10 = 2 * current level  */
     mov     w8, #1
 1:
+    dsb     sy                         /* drain stores/inner-level writebacks */
     add     w2, w10, w10, lsr #1        /* w2 = 3 * level           */
     lsr     w1, w0, w2
     and     w1, w1, #0x7                /* w1 = cache type          */

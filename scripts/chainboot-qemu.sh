@@ -33,6 +33,8 @@ PAYLOAD="hello-uart"
 PORT=4444
 RUN_SECONDS=8
 LOG_PATH=""
+PAD_TO_MAX=false
+EXPECT=""
 
 usage() {
     cat <<EOF
@@ -46,6 +48,8 @@ Options:
   --port <n>             TCP port for the emulated PL011 (default: $PORT)
   --run-seconds <n>      How long to capture the payload's output (default: $RUN_SECONDS)
   --log <path>           Write the whole transcript here as well
+  --pad-to-max           Pad a private payload copy to the supported 8 MiB limit
+  --expect <text>        Fail unless this literal target output is captured
   -h, --help             This message
 EOF
 }
@@ -61,6 +65,9 @@ while [[ $# -gt 0 ]]; do
                        RUN_SECONDS="$2"; shift 2 ;;
         --log)         [[ $# -ge 2 ]] || { echo "chainboot-qemu: --log needs a value" >&2; exit 2; }
                        LOG_PATH="$2"; shift 2 ;;
+        --pad-to-max)  PAD_TO_MAX=true; shift ;;
+        --expect)      [[ $# -ge 2 ]] || { echo "chainboot-qemu: --expect needs a value" >&2; exit 2; }
+                       EXPECT="$2"; shift 2 ;;
         *) echo "chainboot-qemu: unknown option '$1'" >&2; usage >&2; exit 2 ;;
     esac
 done
@@ -88,19 +95,43 @@ cargo build --manifest-path "$CRATE_MANIFEST" --release --example chainloader \
 # The FIRST -serial is the PL011 the kernel prints on; the second is the AUX
 # mini UART and is discarded. Never pass -smp: raspi3b fixes it at 4.
 QEMU_PID=""
+PADDED_IMAGE=""
 cleanup() {
     if [[ -n "$QEMU_PID" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
     fi
+    if [[ -n "$PADDED_IMAGE" ]]; then
+        rm -f -- "$PADDED_IMAGE"
+    fi
 }
 trap cleanup EXIT
+
+if "$PAD_TO_MAX"; then
+    padded_candidate="$REPO_ROOT/target/chainboot-padded-$$-$PORT.img"
+    python3 - "$IMAGE" "$padded_candidate" <<'PY'
+import pathlib
+import sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+limit = 8 * 1024 * 1024
+if len(data) > limit:
+    raise SystemExit("chainboot-qemu: payload exceeds the 8 MiB loader limit")
+with open(sys.argv[2], "xb") as output:
+    output.write(data)
+    output.truncate(limit)
+PY
+    PADDED_IMAGE="$padded_candidate"
+    IMAGE="$PADDED_IMAGE"
+fi
+if { "$PAD_TO_MAX" || [[ -n "$EXPECT" ]]; } && [[ -z "$LOG_PATH" ]]; then
+    LOG_PATH="$REPO_ROOT/target/chainboot-qemu-$PORT.log"
+fi
 
 echo "==> starting QEMU (PL011 on tcp:$PORT, waiting for the pusher)" >&2
 qemu-system-aarch64 \
     -M raspi3b \
     -display none \
-    -serial "tcp::$PORT,server=on,wait=on" \
+    -serial "tcp:127.0.0.1:$PORT,server=on,wait=on" \
     -serial null \
     -kernel "$LOADER" &
 QEMU_PID=$!
@@ -127,3 +158,12 @@ if [[ -n "$LOG_PATH" ]]; then
 fi
 
 python3 "$SCRIPT_DIR/minipush.py" "${PUSH_ARGS[@]}"
+
+if "$PAD_TO_MAX" && ! grep -Eq 'received[[:space:]]*:[[:space:]]*8388608' "$LOG_PATH"; then
+    echo "chainboot-qemu: loader did not receive the complete 8 MiB regression payload" >&2
+    exit 1
+fi
+if [[ -n "$EXPECT" ]] && ! grep -Fq -- "$EXPECT" "$LOG_PATH"; then
+    echo "chainboot-qemu: expected target output was not observed: $EXPECT" >&2
+    exit 1
+fi

@@ -161,9 +161,8 @@ async fn heartbeat() {
 
 /// Waits for everyone, prints the summary, and stops the machine.
 async fn reporter() {
-    // `next_tick`, not `yield_now`: `yield_now` marks this task runnable
-    // immediately, so the core never idles, and this executor only advances
-    // timers on the idle tick — nothing that sleeps would ever wake.
+    // This is a polled condition, so let the core idle between checks rather
+    // than keeping the reporter immediately runnable with `yield_now`.
     while FINISHED.load(Ordering::Acquire) < EXPECTED_FINISHERS || !DONE.load(Ordering::Acquire) {
         task::next_tick().await;
     }

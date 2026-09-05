@@ -229,7 +229,9 @@ impl i2c::Error for crate::drivers::i2c::Error {
             // acknowledged, so the source is unknown.
             Error::Nack => i2c::ErrorKind::NoAcknowledge(i2c::NoAcknowledgeSource::Unknown),
             Error::ClockTimeout | Error::Timeout => i2c::ErrorKind::Other,
-            Error::TooLong => i2c::ErrorKind::Other,
+            Error::TooLong | Error::UnsupportedTransaction | Error::RepeatedStartLost => {
+                i2c::ErrorKind::Other
+            }
         }
     }
 }
@@ -247,6 +249,7 @@ impl i2c::Error for bitbang::Error {
             }
             bitbang::Error::ClockTimeout => i2c::ErrorKind::Other,
             bitbang::Error::BusStuck => i2c::ErrorKind::Bus,
+            bitbang::Error::EmptyRead => i2c::ErrorKind::Other,
         }
     }
 }
@@ -407,12 +410,7 @@ impl i2c::I2c<i2c::SevenBitAddress> for I2c {
         address: u8,
         operations: &mut [i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        transaction(operations, |write, read| match (write, read) {
-            (Some(write), Some(read)) => I2c::write_read(self, address, write, read),
-            (Some(write), None) => I2c::write(self, address, write),
-            (None, Some(read)) => I2c::read(self, address, read),
-            (None, None) => Ok(()),
-        })
+        I2c::transaction(self, address, &mut Operations(operations))
     }
 }
 
@@ -450,12 +448,7 @@ where
         address: u8,
         operations: &mut [i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        transaction(operations, |write, read| match (write, read) {
-            (Some(write), Some(read)) => bitbang::I2c::write_read(self, address, write, read),
-            (Some(write), None) => bitbang::I2c::write(self, address, write),
-            (None, Some(read)) => bitbang::I2c::read(self, address, read),
-            (None, None) => Ok(()),
-        })
+        bitbang::I2c::transaction(self, address, &mut Operations(operations))
     }
 }
 
@@ -469,7 +462,7 @@ where
 
 impl<B> i2c::I2c<i2c::SevenBitAddress> for shared::SharedI2c<B>
 where
-    B: shared::I2cBus + 'static,
+    B: shared::I2cTransaction + 'static,
     B::Error: i2c::Error,
 {
     #[inline]
@@ -499,50 +492,22 @@ where
         address: u8,
         operations: &mut [i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        shared::SharedI2c::transaction(self, |bus| {
-            transaction(operations, |write, read| match (write, read) {
-                (Some(write), Some(read)) => bus.write_read(address, write, read),
-                (Some(write), None) => bus.write(address, write),
-                (None, Some(read)) => bus.read(address, read),
-                (None, None) => Ok(()),
-            })
-        })
+        shared::I2cTransaction::transaction(self, address, &mut Operations(operations))
     }
 }
 
-/// Walks an `embedded-hal` operation list, coalescing a write followed by a
-/// read into one `write_read`.
-///
-/// `embedded-hal` says consecutive operations of the same direction may be
-/// merged and that a change of direction needs a repeated START. Both buses
-/// here expose `write_read` — a write and a read joined by a repeated START —
-/// which covers the common `[Write, Read]` pair exactly. Anything longer is
-/// issued as a sequence of separate transactions.
-fn transaction<E>(
-    operations: &mut [i2c::Operation<'_>],
-    mut run: impl FnMut(Option<&[u8]>, Option<&mut [u8]>) -> Result<(), E>,
-) -> Result<(), E> {
-    let mut index = 0;
+// Reborrow rather than copy the list: no allocation or artificial capacity.
+struct Operations<'a, 'b>(&'a mut [i2c::Operation<'b>]);
 
-    while index < operations.len() {
-        // Split so a write and the read after it can be borrowed at once.
-        let (head, tail) = operations.split_at_mut(index + 1);
-
-        match (&mut head[index], tail.first_mut()) {
-            (i2c::Operation::Write(write), Some(i2c::Operation::Read(read))) => {
-                run(Some(write), Some(read))?;
-                index += 2;
-            }
-            (i2c::Operation::Write(write), _) => {
-                run(Some(write), None)?;
-                index += 1;
-            }
-            (i2c::Operation::Read(read), _) => {
-                run(None, Some(read))?;
-                index += 1;
-            }
-        }
+impl shared::I2cOperations for Operations<'_, '_> {
+    fn len(&self) -> usize {
+        self.0.len()
     }
 
-    Ok(())
+    fn operation(&mut self, index: usize) -> shared::I2cOperation<'_> {
+        match &mut self.0[index] {
+            i2c::Operation::Write(bytes) => shared::I2cOperation::Write(bytes),
+            i2c::Operation::Read(bytes) => shared::I2cOperation::Read(bytes),
+        }
+    }
 }

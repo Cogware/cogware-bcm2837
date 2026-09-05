@@ -28,6 +28,9 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::cell::{Cell, RefCell};
 
 use cogware_bcm2837::{
@@ -35,9 +38,15 @@ use cogware_bcm2837::{
     hal::{
         bitbang::{self, MODE_0, MODE_1, MODE_2, MODE_3, Mode, Phase, Polarity},
         digital::{InputPin, OpenDrainPin, OutputPin},
+        shared::{GpioCs, I2cOperation, SpiDevice},
     },
-    println, time,
+    println,
+    sync::SpinLock,
+    time,
 };
+
+#[cfg(feature = "embedded-hal")]
+use cogware_bcm2837::hal::shared::SharedI2c;
 
 entry!(main);
 
@@ -48,6 +57,7 @@ fn main(_boot: BootInfo) -> ! {
     let mut failures = 0;
 
     failures += spi_demo();
+    failures += spi_shared_cs();
     failures += i2c_demo();
 
     println!();
@@ -70,6 +80,10 @@ struct SpiWires {
     mosi: Cell<bool>,
     miso: Cell<bool>,
     slave: RefCell<SpiSlave>,
+    cs_high: Cell<bool>,
+    check_cs: Cell<bool>,
+    cs_edges: Cell<u32>,
+    unselected_clocks: Cell<u32>,
 }
 
 impl SpiWires {
@@ -81,14 +95,67 @@ impl SpiWires {
             mosi: Cell::new(false),
             miso: Cell::new(false),
             slave: RefCell::new(SpiSlave::new(mode, sends)),
+            cs_high: Cell::new(true),
+            check_cs: Cell::new(false),
+            cs_edges: Cell::new(0),
+            unselected_clocks: Cell::new(0),
         }
     }
 
     /// Every change of the clock net runs the slave.
     fn clock(&self, level: bool) {
+        if self.check_cs.get() && self.cs_high.get() {
+            self.unselected_clocks.set(self.unselected_clocks.get() + 1);
+        }
         let mut slave = self.slave.borrow_mut();
         slave.on_clock(level, self.mosi.get(), &self.miso);
     }
+}
+
+struct CsPin(&'static SpiWires);
+
+impl OutputPin for CsPin {
+    fn set_high(&mut self) {
+        if !self.0.cs_high.replace(true) {
+            self.0.cs_edges.set(self.0.cs_edges.get() + 1);
+        }
+    }
+
+    fn set_low(&mut self) {
+        if self.0.cs_high.replace(false) {
+            self.0.cs_edges.set(self.0.cs_edges.get() + 1);
+        }
+    }
+}
+
+fn spi_shared_cs() -> u32 {
+    let wires: &'static SpiWires = Box::leak(Box::new(SpiWires::new(MODE_0, 0)));
+    wires.check_cs.set(true);
+    let bus = Box::leak(Box::new(SpinLock::new(bitbang::Spi::new(
+        SckPin(wires),
+        MosiPin(wires),
+        MisoPin(wires),
+        MODE_0,
+        0,
+    ))));
+    let mut device = SpiDevice::new(bus, GpioCs(CsPin(wires)));
+    let injected = device.transaction(|bus| {
+        bus.write(&[0x12]);
+        bus.write(&[0x34]);
+        Err::<(), _>(())
+    });
+    let first_ok = injected.is_err() && wires.cs_high.get() && wires.cs_edges.get() == 2;
+    let next = device.write(&[0x56]);
+    let ok = first_ok
+        && next.is_ok()
+        && wires.cs_high.get()
+        && wires.cs_edges.get() == 4
+        && wires.unselected_clocks.get() == 0;
+    println!(
+        "  GPIO CS across transfers and error cleanup: {}",
+        verdict(ok)
+    );
+    u32::from(!ok)
 }
 
 /// The master's clock pin. Driving it steps the slave.
@@ -279,6 +346,10 @@ struct I2cWires {
     stretch: Cell<u32>,
     /// How many times the master looked at a stretched clock.
     stretch_polls: Cell<u32>,
+    starts: Cell<u32>,
+    stops: Cell<u32>,
+    acks: Cell<u32>,
+    nacks: Cell<u32>,
     slave: RefCell<I2cSlave>,
 }
 
@@ -291,6 +362,10 @@ impl I2cWires {
             scl_slave_low: Cell::new(false),
             stretch: Cell::new(0),
             stretch_polls: Cell::new(0),
+            starts: Cell::new(0),
+            stops: Cell::new(0),
+            acks: Cell::new(0),
+            nacks: Cell::new(0),
             slave: RefCell::new(I2cSlave::new(address)),
         }
     }
@@ -304,16 +379,23 @@ impl I2cWires {
     }
 
     fn on_start(&self) {
+        self.starts.set(self.starts.get() + 1);
         self.slave.borrow_mut().on_start();
     }
 
     fn on_stop(&self) {
+        self.stops.set(self.stops.get() + 1);
         self.slave.borrow_mut().on_stop();
     }
 
     fn on_scl_rise(&self) {
         let sda = self.sda();
-        self.slave.borrow_mut().on_scl_rise(sda);
+        let mut slave = self.slave.borrow_mut();
+        if slave.phase == Phase2::TransmitAck {
+            let count = if sda { &self.nacks } else { &self.acks };
+            count.set(count.get() + 1);
+        }
+        slave.on_scl_rise(sda);
     }
 
     fn on_scl_fall(&self) {
@@ -602,6 +684,17 @@ fn i2c_demo() -> u32 {
     failures += i2c_nack();
     failures += i2c_scan();
     failures += i2c_stretch();
+    failures += i2c_operation_list(0);
+    #[cfg(feature = "embedded-hal")]
+    {
+        failures += i2c_operation_list(1);
+        failures += i2c_operation_list(2);
+    }
+    #[cfg(feature = "embedded-hal-async")]
+    {
+        failures += i2c_operation_list(3);
+    }
+    failures += i2c_stretch_timeout();
 
     failures
 }
@@ -655,7 +748,12 @@ fn i2c_nack() -> u32 {
     let mut bus = bitbang::I2c::new(SdaPin(&wires), SclPin(&wires), 0);
 
     let result = bus.write(0x21, &[0x00]);
-    let ok = result == Err(bitbang::Error::AddressNack);
+    let ok = result == Err(bitbang::Error::AddressNack)
+        && wires.starts.get() == 1
+        && wires.stops.get() == 1
+        && wires.sda()
+        && wires.scl()
+        && bus.write(SLAVE_ADDRESS, &[0x00]).is_ok();
 
     println!();
     println!("  addressing an empty address");
@@ -715,6 +813,128 @@ fn i2c_stretch() -> u32 {
     );
     println!("    (the hardware BSC master corrupts data here -- see drivers::i2c)");
 
+    u32::from(!ok)
+}
+
+/// One vector exercises W/W, R/R, both direction changes and empty buffers.
+fn i2c_operation_list(adapter: u8) -> u32 {
+    // SharedI2c deliberately requires a static bus. These four small fixtures
+    // live for this one-shot boot test, after the BSP has initialised its heap.
+    let wires: &'static I2cWires = Box::leak(Box::new(I2cWires::new(SLAVE_ADDRESS)));
+    let bus = Box::leak(Box::new(SpinLock::new(bitbang::I2c::new(
+        SdaPin(wires),
+        SclPin(wires),
+        0,
+    ))));
+    let (mut first, mut second, mut verify) = ([0; 1], [0; 1], [0; 2]);
+    let (mut empty, mut trailing) = ([], []);
+    let empty_result = bus.lock().transaction(SLAVE_ADDRESS, &mut []);
+    let empty_read = bus.lock().read(SLAVE_ADDRESS, &mut []);
+    let untouched = empty_result.is_ok()
+        && empty_read == Err(bitbang::Error::EmptyRead)
+        && wires.starts.get() == 0
+        && wires.stops.get() == 0;
+    let ok = if adapter == 0 {
+        bus.lock()
+            .transaction(
+                SLAVE_ADDRESS,
+                &mut [
+                    I2cOperation::Write(&[2]),
+                    I2cOperation::Write(&[]),
+                    I2cOperation::Write(&[0xDE, 0xAD]),
+                    I2cOperation::Read(&mut first),
+                    I2cOperation::Read(&mut empty),
+                    I2cOperation::Read(&mut second),
+                    I2cOperation::Write(&[2]),
+                    I2cOperation::Read(&mut verify),
+                    I2cOperation::Read(&mut trailing),
+                ],
+            )
+            .is_ok()
+    } else {
+        #[cfg(feature = "embedded-hal")]
+        {
+            use embedded_hal::i2c::{I2c, Operation};
+            let mut operations = [
+                Operation::Write(&[2]),
+                Operation::Write(&[]),
+                Operation::Write(&[0xDE, 0xAD]),
+                Operation::Read(&mut first),
+                Operation::Read(&mut empty),
+                Operation::Read(&mut second),
+                Operation::Write(&[2]),
+                Operation::Read(&mut verify),
+                Operation::Read(&mut trailing),
+            ];
+            if adapter == 1 {
+                I2c::transaction(&mut *bus.lock(), SLAVE_ADDRESS, &mut operations).is_ok()
+            } else {
+                let mut shared = SharedI2c::new(bus);
+                if adapter == 2 {
+                    I2c::transaction(&mut shared, SLAVE_ADDRESS, &mut operations).is_ok()
+                } else {
+                    #[cfg(feature = "embedded-hal-async")]
+                    {
+                        use core::{
+                            future::Future,
+                            pin::pin,
+                            task::{Context, Poll, Waker},
+                        };
+                        let mut future = pin!(embedded_hal_async::i2c::I2c::transaction(
+                            &mut shared,
+                            SLAVE_ADDRESS,
+                            &mut operations,
+                        ));
+                        let mut cx = Context::from_waker(Waker::noop());
+                        let first_poll = future.as_mut().poll(&mut cx);
+                        let second_poll = future.as_mut().poll(&mut cx);
+                        first_poll.is_pending() && matches!(second_poll, Poll::Ready(Ok(())))
+                    }
+                    #[cfg(not(feature = "embedded-hal-async"))]
+                    {
+                        false
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "embedded-hal"))]
+        {
+            false
+        }
+    };
+    let ok = ok
+        && untouched
+        && first == [0xA4]
+        && second == [0xA5]
+        && verify == [0xDE, 0xAD]
+        && wires.starts.get() == 4
+        && wires.stops.get() == 1
+        && wires.acks.get() == 2
+        && wires.nacks.get() == 2;
+    println!(
+        "  I2C operation list adapter {adapter}: START={} STOP={} ACK={} NACK={} {}",
+        wires.starts.get(),
+        wires.stops.get(),
+        wires.acks.get(),
+        wires.nacks.get(),
+        verdict(ok),
+    );
+    u32::from(!ok)
+}
+
+fn i2c_stretch_timeout() -> u32 {
+    let wires = I2cWires::new(SLAVE_ADDRESS);
+    wires.slave.borrow_mut().stretch_next = true;
+    let mut bus = bitbang::I2c::new(SdaPin(&wires), SclPin(&wires), 0);
+    bus.set_stretch_limit(2);
+    let result = bus.write(SLAVE_ADDRESS, &[0]);
+    let ok = result == Err(bitbang::Error::ClockTimeout)
+        && !wires.sda_master_low.get()
+        && !wires.scl_master_low.get();
+    println!(
+        "  stretch timeout releases both master outputs: {}",
+        verdict(ok)
+    );
     u32::from(!ok)
 }
 

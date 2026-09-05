@@ -154,6 +154,19 @@ The lesson is in the code as a comment table rather than in a commit message.
 * `start_block + count` must be within `block_count()`, otherwise
   `Error::OutOfRange`.
 
+The API always takes **512-byte sector numbers**. Before issuing the command,
+both standard-capacity families (`V1` and `V2Sc`) multiply that sector number
+by 512; `V2Hc` passes it unchanged. The multiplication is checked and returns
+`Error::OutOfRange` if the byte address does not fit the command's 32-bit
+argument. A checked shift would only validate the shift count, not lost bits.
+Treating V1 as block-addressed would silently send sector 512 to byte 512
+(sector 1), corrupting the wrong block.
+
+Compile-time regressions beside `CardType::block_address` cover all three
+families at sectors 0, 1, 512, the last representable byte address, its successor
+and `u32::MAX`. They run on every library build, including
+`cargo check --release --lib`; no public testing API or writable card is needed.
+
 Both then call `transfer_blocks`, which takes a direction-carrying enum:
 
 ```rust

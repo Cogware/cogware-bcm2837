@@ -164,6 +164,7 @@ Every example is a complete, bootable kernel. Run one with
 | --- | --- |
 | [`hello-uart`](examples/hello-uart.rs) | the smallest possible kernel, and a boot self-check |
 | [`multicore`](examples/multicore.rs) | releasing cores 1–3, a shared `SpinLock`, a `Barrier` |
+| [`regressions`](examples/regressions.rs) | guard auto-traits, console exclusion, emergency output and timer fairness |
 | [`async-tasks`](examples/async-tasks.rs) | the executor, channels, timers, cross-core spawning |
 | [`heap`](examples/heap.rs) | `Box`/`Vec`/`String`, allocator statistics, size classes |
 | [`gpio`](examples/gpio.rs) | typestate pins, ownership, alternate functions |

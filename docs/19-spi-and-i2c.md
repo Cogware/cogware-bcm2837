@@ -53,11 +53,21 @@ spi.init(spi::Config {
 });
 
 let mut id = [0u8; 3];
-spi.write(&[0x9F])?;
-spi.read(&mut id)?;
+spi.transaction(|bus| {
+    bus.write(&[0x9F])?;
+    bus.read(&mut id)
+})?;
 ```
 
 `init` claims the five pins itself, so you do not call `into_alt` for them.
+`transaction` holds `TA`, and therefore hardware CE, across every transfer and
+delay in its closure. Nested calls join the outer transaction. An RAII guard
+deasserts CE and clears the FIFOs on return, including error returns. Each
+transfer waits for `DONE` before returning, so a following delay is measured
+from the end of the preceding transfer, not from its FIFO submission.
+
+CE0 and CE1 have separate polarity bits (`CSPOL0` at bit 21 and `CSPOL1` at
+bit 22). Selecting CE1 updates its polarity without changing CE0's idle level.
 
 ### Three things the driver has to get right
 
@@ -93,6 +103,12 @@ what Linux does, and omitting it hangs the *next* transfer, not the current one.
 The SSI bus is called `spi`. **SPI1 and SPI2 (the AUX controllers) do not exist
 in QEMU at all** — not stubbed, absent. If you need a second hardware SPI under
 emulation you cannot have one; bit-bang it.
+
+QEMU's BCM2835 SPI model does **not** wire chip-select changes to the attached
+SSI device. Successful JEDEC reads therefore do not prove CE timing or that an
+interrupted command is discarded on deselection. The SPI driver's host unit
+tests inspect `TA` across nested transfers and error cleanup, and check the CE1
+polarity mask; physical CE timing remains untested on hardware.
 
 ## 19.3 Hardware I²C: `drivers::i2c`
 
@@ -147,9 +163,32 @@ still set**. The controller then chains the two. The driver deliberately does
 *not* prefill the TX FIFO for this reason: prefilling lets the write complete
 before the read is armed, and you get a STOP.
 
-If the controller wins that race the transfer still reads correctly, it just
-uses STOP-then-START. Under QEMU it always does — `bcm2835_i2c.c` says so in a
-comment — which is why the example's DS1338 read works there anyway.
+The driver waits for `TA` before feeding a combined write: `TXD` is only FIFO
+space and is also set while the controller is inactive. Before arming the read
+it checks that `TA` remains set and `DONE` remains clear. It does not clear the
+sticky `DONE` bit between phases, and checks it again after writing `ST`, so a
+STOP in that window cannot become a success-shaped STOP/START fallback.
+The check is conservative: an already-completed read also returns
+`RepeatedStartLost`. Polling and error cleanup are bounded.
+
+Losing the race returns **`RepeatedStartLost`**, never success. Some write bytes
+may already have reached the slave, so automatically retrying a non-idempotent
+transaction is unsafe. QEMU completes each write synchronously and does not
+model BSC repeated START; strict combined reads consequently return this error
+there. The hardware chaining path still requires validation on a real board.
+
+The operation-list API merges consecutive write buffers or consecutive read
+buffers into one hardware phase without copying. The total for each phase is
+limited only by the real 16-bit `DLEN` field, not by an adapter buffer size.
+Single-direction lists and a write phase followed by a final read are supported.
+A non-final read or a zero-length chained phase is rejected with
+`UnsupportedTransaction` **before START**. Use bit-banged I²C for unrestricted
+direction changes; it implements the complete operation-list contract.
+
+The `buses` example distinguishes strict transfers from a device-specific
+alternative: DS1338 and TMP105 retain their pointer across STOP, so that demo
+explicitly performs register selection and reading as separate transfers under
+one lock. This is an application choice, not a silent HAL fallback.
 
 ### What QEMU models
 
@@ -206,6 +245,7 @@ The software I²C returns a much more useful error type than the hardware one:
 
 ```rust
 pub enum Error {
+    EmptyRead,         // a complete read phase had no bytes; rejected before START
     AddressNack,        // nobody at that address
     DataNack(usize),    // the device stopped ACKing after N bytes
     ClockTimeout,       // stretched past the spin limit
@@ -214,6 +254,17 @@ pub enum Error {
 ```
 
 `set_stretch_limit` controls how long `ClockTimeout` takes.
+
+`I2c::transaction` accepts `hal::shared::I2cOperation` lists (or a reborrowable
+`I2cOperations` implementation). Adjacent same-direction buffers share one
+address; every direction change uses repeated START. A read buffer boundary
+does not send NACK: only the final byte of the complete read phase does.
+Empty buffers do not split phases, an empty list does not touch the pins, and
+errors attempt STOP while preserving the first error and releasing both master
+outputs. An entirely empty read phase is rejected before START (`EmptyRead`):
+after acknowledging a read address a slave may already hold SDA low for its
+first data bit, so a STOP cannot be guaranteed without clocking an extra byte.
+Empty buffers inside a non-empty read phase remain supported.
 
 ### Why the simulated-pin harness earns its keep
 
@@ -229,6 +280,11 @@ holding `SDA` down and `SCL` is still high — with no falling edge on `SCL` the
 slave never releases, `SDA` never rises, and the START condition's falling edge
 never happens. The repeated START was silently lost. On real hardware that is a
 scope-and-guess afternoon; here it was a failing assertion.
+
+The regression checks now also run a `W/W/R/R/W/R` sequence with empty buffers
+through the native, embedded-hal, shared, and async shared adapters. The slave
+checks the data, four STARTs, one STOP, two read ACKs and two read NACKs. Further
+checks cover NACK recovery, stretch-timeout cleanup and GPIO-CS error cleanup.
 
 ## 19.5 Sharing a bus across four cores: `hal::shared`
 
@@ -250,6 +306,8 @@ rtc.write_read(&[0x00], &mut time)?;
 | `I2cDevice<B>` | the same with a device address baked in |
 | `SpiDevice<B, CS>` | a bus plus a `ChipSelect` — `GpioCs<P>` or `NoCs` |
 | `SpiBus` / `I2cBus` | the traits both the hardware and bit-banged buses implement |
+| `I2cTransaction` | an `I2cBus` that implements operation lists without splitting transactions |
+| `I2cOperation` / `I2cOperations` | allocation-free native buffers and reborrowable adapter lists |
 
 **The unit of atomicity is one transaction, not one byte.** Every method takes
 the lock, runs the complete write/read/write_read, and releases it. Nothing can
@@ -261,7 +319,18 @@ naïvely written firmware.
 write-then-verify, or a device that needs a delay mid-sequence. Everything
 inside the closure runs under one acquisition.
 
-The `buses` example proves it: all four cores run 16 write/read-back rounds
+The SPI wrapper also enters `SpiBus::transaction`: `NoCs` with hardware CE now
+holds selection for the entire closure, not separately for each transfer.
+`GpioCs` still asserts before bus activity and deasserts after controller
+cleanup. Configure hardware `ChipSelect::None` when a GPIO owns selection.
+
+For I²C, the existing closure API is only a software lock boundary. Use
+`I2cTransaction::transaction` for one electrical transaction. Existing custom
+`I2cBus` implementations keep their simple API; to support the embedded-hal
+shared adapters they must implement `I2cTransaction` too. There is deliberately
+no default implementation that turns an unsupported list into separate calls.
+
+The `buses` example exercises it: all four cores run 16 write/read-back rounds
 each against different NVRAM addresses on the same DS1338, 64 transactions
 total, and a torn transaction would show up as a mismatch. It reports 0.
 

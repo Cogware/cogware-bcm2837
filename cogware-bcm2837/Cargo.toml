@@ -94,6 +94,12 @@ test = false
 required-features = ["panic-handler", "allocator"]
 
 [[example]]
+name = "regressions"
+path = "examples/regressions.rs"
+test = false
+required-features = ["panic-handler"]
+
+[[example]]
 name = "async-tasks"
 path = "examples/async-tasks.rs"
 test = false

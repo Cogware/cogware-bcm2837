@@ -187,7 +187,7 @@ being a busy spin.
 | Mask | Meaning | Who sets it | Does it `sev`? |
 | --- | --- | --- | --- |
 | `ready` | Poll now. | `wake()` / `wake_slot()` | Yes. |
-| `polling` | Poll after the next idle tick. | `poll_again()` / `mark_polling()` | No. |
+| `polling` | Poll after an idle wake or one busy timer period. | `poll_again()` / `mark_polling()` | No. |
 
 `poll_again()` is for polled hardware, deadlines and "try again later" futures.
 It inserts the current slot in `polling` and deliberately does not signal an
@@ -202,17 +202,23 @@ The run loop is:
 ```text
 loop
   drain ready and poll each set bit
+  if an event-stream period elapsed:
+      move polling -> ready
+      record the current counter
   if ready became non-empty while polling:
       continue        # do not sleep on work already known to exist
   idle()              # wfe, or bounded fallback
   move polling -> ready
+  record the current counter
 end
 ```
 
-One edge case is accepted and documented: a task in `polling` can starve if some
-other task on the same core is always `ready`. That is not a hidden bug. It is
-the consequence of a cooperative executor with no preemption; code that wants
-fairness must await, for example with `task::yield_now()` or `task::next_tick()`.
+Polling progress does not depend on every ready task becoming idle. A task
+performing work between `yield_now()` calls may remain runnable indefinitely;
+timers and hardware pollers still get a turn after an event-stream period.
+This remains cooperative, not preemptive: a single `poll` that never returns
+still wedges the core. Use `next_tick()` for a polled condition so otherwise
+idle cores can sleep rather than spinning.
 
 ## How a core sleeps without an interrupt controller
 
@@ -304,7 +310,7 @@ in [06-synchronisation.md](06-synchronisation.md).
 
 The console keeps its `SpinLock`. It is taken and released inside a single
 `write_fmt`, and a fault handler must be able to reach it through `try_lock` or
-the documented bypass path.
+stateless emergency MMIO without borrowing the shared driver.
 
 Both `Mutex::lock` and `Channel::send` / `Channel::recv` use the same
 register-before-recheck idiom:
@@ -365,8 +371,9 @@ pub struct Sleep {
 It compares `time::ticks()` with an absolute deadline. If the deadline has not
 expired, it calls `poll_again()` and returns `Poll::Pending`. A sleep can
 therefore overrun by up to one event-stream period: about 1 ms in QEMU and
-about 3.4 ms on hardware. These timers pace work; they do not meet hard
-deadlines.
+about 3.4 ms on hardware, plus the time spent in cooperative task polls.
+Continuously ready tasks do not prevent these timer checks. These timers pace
+work; they do not meet hard deadlines.
 
 The public constructors are:
 
@@ -428,7 +435,7 @@ impl Future for NextByte {
 ```
 
 The order matters: check the register, return `Ready` if possible, otherwise
-ask for one more idle tick and return `Pending`.
+ask for one more polling tick and return `Pending`.
 
 ### Cross-core work
 

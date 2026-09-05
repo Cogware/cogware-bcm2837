@@ -30,6 +30,7 @@
 use crate::hal::{
     delay::{nanos_to_ticks, spin_ticks},
     digital::{InputPin, OpenDrainPin, OutputPin},
+    shared::{I2cOperation, I2cOperations, i2c_phase},
 };
 
 pub use crate::drivers::spi::{MODE_0, MODE_1, MODE_2, MODE_3, Mode, Phase, Polarity};
@@ -213,6 +214,12 @@ where
 /// Something went wrong on a bit-banged I2C bus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
+    /// A whole read phase contains no bytes.
+    ///
+    /// After its address ACK a slave may already drive the first data bit
+    /// low, preventing STOP or repeated START until that byte is clocked.
+    /// Reject this request before START rather than silently adding a byte.
+    EmptyRead,
     /// Nothing acknowledged the address.
     AddressNack,
     /// A device acknowledged the address but then stopped acknowledging data.
@@ -285,18 +292,12 @@ where
 
     /// Writes `data` to the device at seven-bit address `address`.
     pub fn write(&mut self, address: u8, data: &[u8]) -> Result<(), Error> {
-        self.start()?;
-        let result = self.write_addressed(address, data);
-        self.stop();
-        result
+        self.transaction(address, &mut [I2cOperation::Write(data)])
     }
 
     /// Reads `data.len()` bytes from the device at `address`.
     pub fn read(&mut self, address: u8, data: &mut [u8]) -> Result<(), Error> {
-        self.start()?;
-        let result = self.read_addressed(address, data);
-        self.stop();
-        result
+        self.transaction(address, &mut [I2cOperation::Read(data)])
     }
 
     /// Writes `write`, then reads `read`, with a repeated START in between.
@@ -304,18 +305,70 @@ where
     /// The bus is never released, so nothing can interleave a transaction
     /// between the register number and the data.
     pub fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
-        self.start()?;
+        self.transaction(
+            address,
+            &mut [I2cOperation::Write(write), I2cOperation::Read(read)],
+        )
+    }
 
-        if let Err(error) = self.write_addressed(address, write) {
-            self.stop();
-            return Err(error);
+    /// Executes an operation list with one final STOP.
+    ///
+    /// Same-direction buffers share one address phase. Every direction change
+    /// uses repeated START; only the final byte of each read phase is NACKed.
+    /// An entirely empty read phase returns [`Error::EmptyRead`] before START.
+    pub fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut (impl I2cOperations + ?Sized),
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
         }
-
-        self.restart()?;
-
-        let result = self.read_addressed(address, read);
-        self.stop();
-        result
+        let mut start = 0;
+        while start < operations.len() {
+            let phase = i2c_phase(operations, start);
+            if phase.read && phase.length == Some(0) {
+                return Err(Error::EmptyRead);
+            }
+            start = phase.end;
+        }
+        self.start()?;
+        let result = (|| {
+            let mut start = 0;
+            while start < operations.len() {
+                let phase = i2c_phase(operations, start);
+                if start != 0 {
+                    self.restart()?;
+                }
+                if !self.write_byte((address << 1) | u8::from(phase.read))? {
+                    return Err(Error::AddressNack);
+                }
+                let mut sent = 0;
+                for index in start..phase.end {
+                    match operations.operation(index) {
+                        I2cOperation::Write(bytes) => {
+                            for &byte in bytes {
+                                if !self.write_byte(byte)? {
+                                    return Err(Error::DataNack(sent));
+                                }
+                                sent += 1;
+                            }
+                        }
+                        I2cOperation::Read(bytes) => {
+                            let length = bytes.len();
+                            for (offset, byte) in bytes.iter_mut().enumerate() {
+                                let ack = index != phase.last_nonempty || offset + 1 < length;
+                                *byte = self.read_byte(ack)?;
+                            }
+                        }
+                    }
+                }
+                start = phase.end;
+            }
+            Ok(())
+        })();
+        let stopped = self.stop();
+        result.and(stopped)
     }
 
     /// Reports whether anything answers at `address`.
@@ -324,12 +377,7 @@ where
     /// [`crate::drivers::i2c::I2c::probe`] this consumes no data and has no
     /// side effect on the device.
     pub fn probe(&mut self, address: u8) -> bool {
-        let found = self
-            .start()
-            .and_then(|()| self.write_byte(address << 1))
-            .unwrap_or(false);
-        self.stop();
-        found
+        self.write(address, &[]).is_ok()
     }
 
     /// Scans the bus and calls `found` for every address that answers.
@@ -342,38 +390,6 @@ where
     }
 
     // -- transaction pieces --------------------------------------------------
-
-    /// Sends the address with the write bit, then the data.
-    fn write_addressed(&mut self, address: u8, data: &[u8]) -> Result<(), Error> {
-        if !self.write_byte(address << 1)? {
-            return Err(Error::AddressNack);
-        }
-
-        for (index, &byte) in data.iter().enumerate() {
-            if !self.write_byte(byte)? {
-                return Err(Error::DataNack(index));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Sends the address with the read bit, then clocks the data in.
-    ///
-    /// Every byte but the last is acknowledged; the last is not, which is how
-    /// the master tells the device to stop talking.
-    fn read_addressed(&mut self, address: u8, data: &mut [u8]) -> Result<(), Error> {
-        if !self.write_byte((address << 1) | 1)? {
-            return Err(Error::AddressNack);
-        }
-
-        let last = data.len().saturating_sub(1);
-        for (index, byte) in data.iter_mut().enumerate() {
-            *byte = self.read_byte(index != last)?;
-        }
-
-        Ok(())
-    }
 
     /// `SDA` falls while `SCL` is high.
     fn start(&mut self) -> Result<(), Error> {
@@ -421,19 +437,19 @@ where
 
     /// `SDA` rises while `SCL` is high.
     ///
-    /// Infallible on purpose: it runs on the error path, where a second error
-    /// would only mask the first. A stuck bus stays stuck and the next
-    /// [`I2c::start`] reports it.
-    fn stop(&mut self) {
+    /// Release both lines even on failure; the transaction preserves its first
+    /// error rather than replacing it with a cleanup error.
+    fn stop(&mut self) -> Result<(), Error> {
         self.scl.drive_low();
         self.sda.drive_low();
         self.wait_half();
 
-        let _ = self.release_scl();
+        let result = self.release_scl();
         self.wait_half();
 
         self.sda.release();
         self.wait_half();
+        result
     }
 
     /// Shifts a byte out, most significant bit first, and returns whether the
@@ -504,10 +520,10 @@ where
 
         let mut spins = 0u32;
         while self.scl.is_low() {
-            spins += 1;
-            if spins > self.stretch_limit {
+            if spins == self.stretch_limit {
                 return Err(Error::ClockTimeout);
             }
+            spins += 1;
             core::hint::spin_loop();
         }
 

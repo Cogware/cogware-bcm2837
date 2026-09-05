@@ -209,18 +209,24 @@ bit 6 of `ISS` is clear, so this was a read; and because this is an abort,
 ## Register dumps and the console lock
 
 `dump` starts at `cogware-bcm2837\src\arch\exception.rs`. It calls
-`console::with_writer` once for the whole report, so another core's output
-cannot land in the middle of a register listing. The report includes the vector
+`console::with_emergency_writer` once for the whole report, taking the UART lock
+when it is immediately available. The report includes the vector
 slot, `ESR_EL1`, fault status, access direction, `FAR_EL1`, `ELR_EL1`,
 `SPSR_EL1`, `SP_EL0`, `FPSR/CR`, and `x0..x30`
 (`cogware-bcm2837\src\arch\exception.rs`).
 
-`console::with_writer` uses `try_lock`, not `lock`
+`console::with_emergency_writer` uses `try_lock`, not `lock`
 (`cogware-bcm2837\src\console.rs`). A fault can occur on a core already inside
 `println!`, and therefore already holding the UART lock. Blocking there would
-deadlock the core; bypassing the lock can garble output, but still allows a
-crash report. See [06-synchronisation.md](06-synchronisation.md) for the locking
-rule.
+deadlock the core. The emergency writer instead uses stateless external MMIO:
+it never borrows the shared driver or changes its counters. Contended reports
+may interleave, but do not fabricate a second mutable reference to UART state.
+Bounded FIFO waits return `fmt::Error` if the UART cannot progress. The fault
+path has no second diagnostic channel on which to report a failed UART.
+
+Breakpoint messages, unexpected IRQ messages and the final halting line use
+the same path. Panic reporting also uses it rather than forcibly unlocking
+another core's console. See [06-synchronisation.md](06-synchronisation.md).
 
 ## IRQ handler registration
 
@@ -269,9 +275,9 @@ install an `IrqHandler`, and only then unmask CPU IRQs.
 ## Relationship to SMP and MMU state
 
 Exception entry itself does not take a `SpinLock`; it writes the trap frame to
-the current stack and calls Rust. Printing from the handler follows the console
-policy: MMU off means the boot invariant makes bypass single-threaded; MMU on
-means try the UART lock once, then bypass to avoid self-deadlock.
+the current stack and calls Rust. Emergency reporting never uses exclusive
+atomics with the MMU off. With the MMU on it may try the UART lock, but it
+accesses only external MMIO in either case, not an interrupted driver's RAM.
 
 For normal SMP operation, every secondary has enabled its MMU before its first
 `println!`, before it takes a `SpinLock`, and before it waits on a `Barrier`.
@@ -282,8 +288,8 @@ rather than relying on special exception-only behaviour.
 
 If an exception dump hangs before printing registers, suspect a blocking lock in
 exception context. If a dump prints but lines from different cores interleave,
-that is the accepted failure mode of `with_writer` falling back to
-`UART.bypass()`.
+that is the accepted failure mode of stateless emergency output while the
+ordinary UART lock is held. Ordinary `with_writer` never bypasses contention.
 
 If an IRQ fires repeatedly, suspect missing acknowledgement. For PL011, the
 acknowledgement hook is `clear_interrupts`, which writes `ICR_ALL = 0x7FF` to

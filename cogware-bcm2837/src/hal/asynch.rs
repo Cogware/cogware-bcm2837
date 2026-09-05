@@ -27,9 +27,9 @@
 //!
 //! An async bus transfer is still driven by the CPU — there is no DMA here —
 //! so the transfer itself is blocking. The async wrappers add a yield
-//! *between* transfers and, for shared buses, an async [`crate::task::Mutex`]
-//! instead of a spin lock: a task that finds the bus busy sleeps rather than
-//! burning its core.
+//! *between* transactions. Shared buses hold their spin lock only during the
+//! blocking transaction, never across an await. The operation list has exactly
+//! the same chip-select and repeated-START semantics as the blocking adapter.
 //!
 //! A 16-byte I2C read at 100 kHz takes 1.4 ms; spinning through that on core 0
 //! while core 1 holds the bus wastes 1.7 million cycles.
@@ -331,7 +331,7 @@ where
 
 impl<B> i2c::I2c<i2c::SevenBitAddress> for shared::SharedI2c<B>
 where
-    B: shared::I2cBus + 'static,
+    B: shared::I2cTransaction + 'static,
     B::Error: embedded_hal::i2c::Error,
 {
     /// Yields once, then runs the transaction with the bus locked.
