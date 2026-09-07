@@ -124,6 +124,17 @@ pub enum Tag {
     SetVirtualOffset = 0x0004_8009,
     /// Bytes per line of the allocated framebuffer.
     GetPitch = 0x0004_0008,
+    /// Blocks until the display's next vertical blanking interval.
+    ///
+    /// Unlike every other tag here this one is a *wait*, not a setting: the
+    /// firmware does not answer it until the beam reaches the end of a frame.
+    /// It is the only vertical-sync signal the property interface offers, and
+    /// without it a page flip lands wherever the beam happens to be and the
+    /// panel shows two frames at once. See [`super::framebuffer::Framebuffer::wait_for_vsync`].
+    ///
+    /// Not every firmware and no emulator implements it, so a caller must be
+    /// ready for it to go unanswered rather than treating that as fatal.
+    SetVsync = 0x0004_800E,
     /// Blank or unblank the display.
     BlankScreen = 0x0004_0002,
 }

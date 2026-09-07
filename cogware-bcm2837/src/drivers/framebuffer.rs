@@ -209,6 +209,12 @@ pub enum Error {
     BadGeometry,
     /// The framebuffer has not been initialised.
     NotReady,
+    /// The firmware did not answer the vertical-sync tag.
+    ///
+    /// Not a fault: [`mailbox::Tag::SetVsync`] is optional, and an emulator or
+    /// a firmware built without it simply does not reply. A caller that wanted
+    /// to pace itself to the display has to fall back to a clock.
+    VsyncUnsupported,
 }
 
 impl From<mailbox::Error> for Error {
@@ -228,6 +234,7 @@ impl core::fmt::Display for Error {
             }
             Self::BadGeometry => f.write_str("implausible framebuffer geometry"),
             Self::NotReady => f.write_str("framebuffer not initialised"),
+            Self::VsyncUnsupported => f.write_str("firmware does not answer the vsync tag"),
         }
     }
 }
@@ -552,10 +559,58 @@ impl Framebuffer {
         self.height
     }
 
+    /// Blocks until the display reaches its next vertical blanking interval.
+    ///
+    /// This is what a page flip has to be aligned to. [`flip`](Self::flip) is a
+    /// `SetVirtualOffset`, which the firmware applies the moment it receives
+    /// it; issued while the beam is mid-frame, the top of the screen is drawn
+    /// from one page and the bottom from another, and a program flipping faster
+    /// than the panel scans out shows several frames at once. Called
+    /// immediately before a flip, this puts the change inside the blanking
+    /// interval, where nothing is being scanned out.
+    ///
+    /// It is also the only frame clock the board has: the tag returns once per
+    /// displayed frame, at the panel's own rate, without the caller needing to
+    /// know what that rate is.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::VsyncUnsupported`] if the firmware does not answer the tag.
+    /// That is not a fault and not fatal — QEMU never answers it, and a caller
+    /// that cannot wait for the display should pace itself against
+    /// [`crate::time`] instead. It is reported rather than ignored so the
+    /// difference is visible: a program that silently stops waiting for vsync
+    /// looks exactly like one that never asked.
+    ///
+    /// # Cost
+    ///
+    /// Up to a whole frame of wall time — 16.7 ms at 60 Hz — spent inside the
+    /// mailbox. Nothing else on this core runs during it.
+    pub fn wait_for_vsync(&mut self) -> Result<(), Error> {
+        if !self.ready {
+            return Err(Error::NotReady);
+        }
+        let mut out = [0u32; 1];
+        match super::MAILBOX.lock().call(Tag::SetVsync, &[0], &mut out) {
+            Ok(_) => Ok(()),
+            // The firmware answered the message but skipped this tag, which is
+            // how an unimplemented one comes back. A transport failure is a
+            // real error and stays one.
+            Err(mailbox::Error::TagNotAnswered | mailbox::Error::Rejected) => {
+                Err(Error::VsyncUnsupported)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Presents the page just drawn and moves drawing to the next one.
     ///
     /// With a single page this still costs a mailbox round trip but is
     /// harmless, so callers do not have to special-case it.
+    ///
+    /// This does **not** wait for vertical blank: it takes effect the moment
+    /// the firmware receives it. Call [`wait_for_vsync`](Self::wait_for_vsync)
+    /// first if the panel is being scanned out, or the frame will tear.
     pub fn flip(&mut self) -> Result<(), Error> {
         if !self.ready {
             return Err(Error::NotReady);
@@ -565,6 +620,69 @@ impl Framebuffer {
         super::MAILBOX
             .lock()
             .call(Tag::SetVirtualOffset, &[0, showing * self.height], &mut out)?;
+        self.visible_page = showing;
+        self.draw_page = (showing + 1) % self.pages;
+        Ok(())
+    }
+
+    /// Waits for vertical blank and presents the page just drawn, in one
+    /// message.
+    ///
+    /// This is [`wait_for_vsync`](Self::wait_for_vsync) followed by
+    /// [`flip`](Self::flip), and it exists because doing those as two calls
+    /// does not work on a real panel.
+    ///
+    /// # Why one message and not two calls
+    ///
+    /// The blanking interval is the only window in which the offset may
+    /// change without the display showing two pages at once, and at 2400x900
+    /// with reduced blanking it is about 370 us wide. A property-mailbox round
+    /// trip costs anywhere from tens to hundreds of microseconds. So a caller
+    /// that waits for blank, returns to the ARM, and then starts a *second*
+    /// transaction to move the offset is racing the beam with a stopwatch that
+    /// is the same order of magnitude as the window — it lands inside blanking
+    /// much of the time, and misses often enough to be visible as intermittent
+    /// flicker.
+    ///
+    /// The VideoCore applies the tags of one message in order, so putting both
+    /// in a single transaction hands the whole sequence to the firmware: it
+    /// waits for blank and moves the offset itself, with no ARM involvement in
+    /// between and nothing left to race.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::VsyncUnsupported`] if the firmware does not answer the vsync
+    /// tag, in which case **the flip has not happened either** — the message
+    /// is rejected as a whole. A caller that has to work on such a firmware
+    /// should test with [`wait_for_vsync`](Self::wait_for_vsync) once and use
+    /// plain [`flip`](Self::flip) thereafter, rather than paying a failing
+    /// transaction every frame.
+    pub fn flip_on_vsync(&mut self) -> Result<(), Error> {
+        if !self.ready {
+            return Err(Error::NotReady);
+        }
+        let showing = self.draw_page;
+
+        // Hoisted: a `TagIo` borrows its request, which must outlive the list.
+        let want_vsync = [0u32];
+        let want_offset = [0u32, showing * self.height];
+        let mut got_vsync = [0u32; 1];
+        let mut got_offset = [0u32; 2];
+
+        {
+            let mut tags = [
+                TagIo::new(Tag::SetVsync, &want_vsync, &mut got_vsync),
+                TagIo::new(Tag::SetVirtualOffset, &want_offset, &mut got_offset),
+            ];
+            match super::MAILBOX.lock().call_many(&mut tags) {
+                Ok(()) => {}
+                Err(mailbox::Error::TagNotAnswered | mailbox::Error::Rejected) => {
+                    return Err(Error::VsyncUnsupported);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
         self.visible_page = showing;
         self.draw_page = (showing + 1) % self.pages;
         Ok(())
