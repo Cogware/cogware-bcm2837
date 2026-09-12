@@ -418,10 +418,6 @@ the boot card is not expendable — and `CPUECTLR_EL1.SMPEN`, which sits on the
 EL3-only path that Pi firmware never takes. Each is marked as such in the source
 and in the docs.
 
-## Licence
-
-MIT OR Apache-2.0.
-
 ## License
 
 GPL-3.0-only. A commercial license is available for firmware you cannot ship
