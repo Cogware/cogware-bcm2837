@@ -179,7 +179,7 @@ embedded-hal = { version = "1.0", optional = true }
 embedded-hal-async = { version = "1.0", optional = true }
 embedded-sdmmc = { version = "0.10", optional = true, default-features = false }
 ```
-That mirrors `instructions.md` rule 1.1: no external crates beyond the
+That mirrors the dependency policy: no external crates beyond the
 `embedded-*` ecosystem, in two tiers — the first two are pure trait
 crates with no transitive dependencies and no code to audit, so they are on by
 default; the third is a real FAT implementation, so it is off by default. `--no-default-features` builds the whole BSP
@@ -398,7 +398,7 @@ cargo run --release --example shell -- -s -S
 ```
 
 ## Warning policy and troubleshooting
-`instructions.md` says a build that emits a warning is broken. In a bare-metal
+A build that emits a warning is a broken build. In a bare-metal
 kernel, warnings often reveal ABI, layout or `unsafe` drift that QEMU may not
 expose immediately. Do not weaken lints to hide them.
 Automation PowerShell sessions can inherit a stale `PATH`. If Scoop tools are

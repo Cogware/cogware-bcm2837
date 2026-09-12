@@ -140,7 +140,8 @@ fn main(boot: BootInfo) -> ! { .. }
 ```
 
 It is a `macro_rules!` macro, not an attribute like `#[entry]`, and that is a
-consequence of rule 1.1: an attribute macro would require a proc-macro crate,
+consequence of the empty dependency table: an attribute macro would require a
+proc-macro crate,
 and a proc-macro crate would require `syn` and `quote`. So `entry!` expands to
 two `#[unsafe(no_mangle)]` functions named `__cogware_main_primary` and
 `__cogware_main_secondary`, which the BSP declares in an `unsafe extern "Rust"`

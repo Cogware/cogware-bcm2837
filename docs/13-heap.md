@@ -12,7 +12,7 @@ default allocation-error handler has been stable since Rust 1.68, so
 `no_std` + `extern crate alloc` + `#[global_allocator]` is enough.
 
 The surrounding rule still matters. The synchronisation rule in
-[`instructions.md`](../instructions.md) says no `LDXR`/`STXR`, and therefore no
+`LDXR`/`STXR` are not used before the MMU is on, and therefore no
 `SpinLock`, before the calling core has enabled its MMU. The heap is built on a
 `SpinLock<Inner>`, so it only opens after `arch::init_core()`.
 
@@ -234,8 +234,7 @@ bug; it is architecturally undefined territory.
 `SpinLock` is described in [06-synchronisation.md](06-synchronisation.md). It
 uses `LDXR`/`STXR`. On AArch64 those exclusives are architecturally
 UNPREDICTABLE when aimed at Device memory, and before the MMU is enabled all
-memory behaves as Device-nGnRnE. Project rule 5 in
-[`instructions.md`](../instructions.md) bans that outright.
+memory behaves as Device-nGnRnE, which the project does not do.
 
 The heap therefore must not be used before `arch::init_core()` has enabled the
 MMU on the calling core. The primary boot path enforces the order:

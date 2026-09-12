@@ -7,7 +7,7 @@ tasks wait for UART bytes, timer ticks, locks or cross-core work.
 It uses stable Rust 1.98 and edition 2024, with no nightly features.
 
 The surrounding rules still matter. The synchronisation rule in
-[`instructions.md`](../instructions.md) says no read-modify-write atomic may be
+No read-modify-write atomic may be
 touched before the calling core has enabled its MMU. The async task table uses
 RMW atomics and `SpinLock`, so executors only start at the end of bring-up,
 after `arch::init_core()`.
@@ -518,8 +518,7 @@ task::run()
 That replaces the old `cpu::halt()` end state. An idle secondary still sleeps
 in `wfe`, but now a `sev` from a channel send can put it back to work.
 
-The ordering constraint comes from rule 5 in
-[`instructions.md`](../instructions.md): `LDXR`/`STXR` are UNPREDICTABLE on
+The ordering constraint is that `LDXR`/`STXR` are UNPREDICTABLE on
 Device memory. Nothing in `task` may be touched before the calling core has
 enabled its MMU. This is automatic in the current boot order because
 executors start only after `arch::init_core()` has enabled the MMU and event

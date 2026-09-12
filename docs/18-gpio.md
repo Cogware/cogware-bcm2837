@@ -66,7 +66,7 @@ at 10 MHz; you would not bit-bang at 10 MHz.
 
 > Lock ordering: the bus drivers take `SPI0`/`I2C0`/`I2C1` and *then* `GPIO`
 > inside `init`, because claiming the pins is a `GPFSEL` write. Never take
-> `GPIO` and then a bus lock. See `instructions.md` rule 5.10.
+> `GPIO` and then a bus lock.
 
 ## 18.3 Typestate: `Pin<N, MODE>`
 

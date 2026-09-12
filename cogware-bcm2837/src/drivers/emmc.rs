@@ -13,9 +13,9 @@
 //!
 //! # Locking
 //!
-//! Rule 5.5 forbids holding a lock across a spin-wait; this driver is the
-//! documented exception, since an SD/MMC transaction is itself a bounded poll
-//! of the controller. Every wait has an explicit microsecond deadline (see
+//! A lock is not normally held across a spin-wait; this driver is the
+//! exception, since an SD/MMC transaction is itself a bounded poll of the
+//! controller. Every wait has an explicit microsecond deadline (see
 //! `wait_until`) so a wedged card cannot hold the lock forever.
 //!
 //! # GPIO
@@ -33,7 +33,7 @@
 //!
 //! # Warnings and dead code
 //!
-//! Per instructions.md rule 2.3, this module carries a top-level
+//! This module carries a top-level
 //! `#![allow(dead_code)]`: the command table, register bit constants and
 //! [`Error`] enum are intentionally complete descriptions of the hardware and
 //! its failure modes.

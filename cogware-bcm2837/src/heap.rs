@@ -63,7 +63,7 @@
 //! # Ordering constraints
 //!
 //! [`SpinLock`] uses `LDXR`/`STXR`, which are UNPREDICTABLE while the MMU is
-//! off (rule 5 in `instructions.md`). The heap must not be touched before
+//! off. The heap must not be touched before
 //! [`arch::init_core`](crate::arch::init_core) has enabled the MMU on the
 //! calling core. This is enforced: `READY` is a plain [`AtomicBool`] (`LDARB`,
 //! which *is* defined on Device memory), checked before the lock is taken, so

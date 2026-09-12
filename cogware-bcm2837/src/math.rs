@@ -18,7 +18,7 @@
 //! # Not provided
 //!
 //! No transcendentals (`sin`, `ln`, `powf`): the A53 has no instruction for
-//! them, and rule 1.1 rules out pulling in `libm`.
+//! them, and the crate takes no external dependency to get them.
 //!
 //! # Rounding modes
 //!

@@ -6,7 +6,7 @@ controller — works on any chip whose BSP implements them. The BSP implements
 them, so those drivers work here.
 
 This is the **only** external dependency in the project, and
-[`instructions.md`](../instructions.md) rule 1.1 explains the terms.
+The dependency policy explains the terms.
 
 ---
 

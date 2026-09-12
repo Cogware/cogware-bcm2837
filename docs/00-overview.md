@@ -184,7 +184,7 @@ handed over as an uncached bus address.** The GPU is not in the ARM coherency
 domain. Getting either half wrong produces corruption that looks exactly like
 a race condition.
 
-Both are stated as rules in [`instructions.md`](../instructions.md); both are
+Both are project rules; both are
 explained in full in [`04-smp.md`](04-smp.md),
 [`06-synchronisation.md`](06-synchronisation.md) and
 [`03-memory-and-mmu.md`](03-memory-and-mmu.md).
@@ -262,6 +262,7 @@ If you are new to the project:
 23. [`23-scripts.md`](23-scripts.md) — every host script, Windows and Linux
     side by side: what each one does, every option, and the everyday workflows.
 
-If you are about to change code, read [`instructions.md`](../instructions.md)
-first — particularly rule 5, which is the one most likely to be broken by an
+If you are about to change code that runs before the MMU is enabled, read
+[`13-heap.md`](13-heap.md) and [`12-async.md`](12-async.md) first: `LDXR`/`STXR`
+are UNPREDICTABLE there, and that is the constraint most easily broken by an
 otherwise reasonable-looking change.

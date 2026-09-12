@@ -14,10 +14,10 @@ Raspberry Pi 3 hardware. It should be read with
 [12-async.md](12-async.md).
 
 The project remains deliberately small: stable Rust, no external crates beyond
-the two optional trait crates in rule 1.1, and a bare-metal BCM2837 kernel
+the two optional trait crates, and a bare-metal BCM2837 kernel
 whose behaviour is inspectable from reset to shell.
-The one heap it has is its own, and it is 300 lines. The rules for changing it
-live in `instructions.md`; the public summary lives in `README.md`.
+The one heap it has is its own, and it is 300 lines. The public summary lives
+in `README.md`.
 
 ## Done and verified in QEMU
 
@@ -96,7 +96,7 @@ reporting all four cores online. `minipush.ps1` / `minipush.py` and
 
 Repository support files are also in place: `firmware\config.txt` for the Pi
 firmware path, `openocd\rpi3.cfg` for hardware debugging, the complete numbered
-`docs\` set, `README.md`, and `instructions.md`.
+`docs\` set and `README.md`.
 
 ## Phase 1: interrupts and local peripherals
 

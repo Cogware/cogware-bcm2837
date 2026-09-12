@@ -357,7 +357,6 @@ cogware-bcm2837/
 scripts/           QEMU launchers, console harness and chain-boot tools,
                    each with a PowerShell and a Bash version
 docs/              design notes
-instructions.md    the rules the code is written to
 ```
 
 ## Documentation
@@ -389,8 +388,10 @@ instructions.md    the rules the code is written to
 | [`docs/22-chainloading.md`](docs/22-chainloading.md) | pushing kernels over serial instead of reflashing the card |
 | [`docs/23-scripts.md`](docs/23-scripts.md) | every host script, Windows and Linux, option by option |
 
-[`instructions.md`](instructions.md) holds the coding rules. Read at least
-rule 5 before touching anything that runs before the MMU is enabled.
+Before touching anything that runs before the MMU is enabled, read
+[`docs/13-heap.md`](docs/13-heap.md) and
+[`docs/12-async.md`](docs/12-async.md): `LDXR`/`STXR` are UNPREDICTABLE there,
+which is the constraint most easily broken by an otherwise reasonable change.
 
 ## Status
 

@@ -8,8 +8,7 @@
 //!
 //! Compiled only with the `embedded-sdmmc` feature, which is **off** by
 //! default: unlike `embedded-hal` this dependency is not a pure trait crate,
-//! and brings a FAT implementation and transitive crates with it. See
-//! `instructions.md` rule 1.1.
+//! and brings a FAT implementation and transitive crates with it.
 //!
 //! # Usage
 //!

@@ -470,7 +470,7 @@ Roughly five seconds instead of a card swap, and the card never comes out. See
 | Hardware: garbage on serial | `init_uart_clock` is not 48 MHz, or `dtoverlay=disable-bt` is absent |
 | Hardware: boots, but only one core | expected; `smp::start_secondaries()` releases the rest |
 | `kernel8.img` grows by ~512 KiB | `.stacks` lost `NOLOAD` in `link.ld` |
-| A build warning | treat as a failure. See `instructions.md` |
+| A build warning | treat as a failure |
 
 ## The SD card must use an MBR partition table
 

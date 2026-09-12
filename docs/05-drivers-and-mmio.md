@@ -31,7 +31,7 @@ their own page, because they are more than ordinary MMIO:
 Note one exception to the MMIO rules below. The framebuffer *control* path is
 the mailbox, but the framebuffer *pixels* are not MMIO at all: they are ordinary
 `Normal-NC` DRAM shared with the GPU. Rule 4 in
-[`instructions.md`](../instructions.md) does not apply to them, which is why
+the MMIO rule does not apply to them, which is why
 `framebuffer.rs` writes pixels through a plain `&mut [u32]` rather than
 `RegisterBlock`.
 

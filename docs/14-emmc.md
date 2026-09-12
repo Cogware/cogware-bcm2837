@@ -52,7 +52,7 @@ driver sends the pair itself and checks `ST_APP_CMD` in the `CMD55` response,
 because a card that ignored `CMD55` will happily misinterpret the `ACMD` that
 follows as an ordinary command with the same index.
 
-Every wait is bounded, per rule 10.2 in [`instructions.md`](../instructions.md).
+Every wait is bounded, so a wedged card cannot hang the caller.
 A card that never answers produces `Error::Timeout`, not a hung core.
 
 ## Bring-up sequence
