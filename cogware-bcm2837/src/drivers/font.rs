@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! An 8x8 bitmap font for the framebuffer console.
 //!
 //! Hand-drawn for this kernel, so no third-party font licence applies. The

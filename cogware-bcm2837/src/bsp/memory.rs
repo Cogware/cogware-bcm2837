@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Physical memory map of the BCM2837 as wired on the Raspberry Pi 3.
 //!
 //! Every address here is a *physical* address. The kernel identity-maps the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! BCM2835 SPI0 master.
 //!
 //! SPI0 is the full master: 64-byte TX and RX FIFOs, three chip selects with

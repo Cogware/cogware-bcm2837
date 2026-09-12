@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Async buses and async pins: `embedded-hal-async` on the BSP's executor.
 //!
 //! Four cores each run their own executor and contend for one I2C bus without

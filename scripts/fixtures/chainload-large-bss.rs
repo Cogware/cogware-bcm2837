@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! QEMU payload exercising large BSS and heap use before secondary startup.
 //! Build instructions are in docs/22-chainloading.md.
 

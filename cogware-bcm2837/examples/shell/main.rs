@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! # The reference kernel
 //!
 //! Everything the BSP exposes, in one bootable image, driven from an

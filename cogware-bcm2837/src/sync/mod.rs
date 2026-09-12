@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Cross-core synchronisation primitives.
 //!
 //! All of these rely on `LDXR`/`STXR`, so they may only be used once the

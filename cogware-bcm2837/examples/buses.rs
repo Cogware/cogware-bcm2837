@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! The hardware SPI and I2C controllers, talking to real virtual devices.
 //!
 //! Run with `.\scripts\run-qemu.ps1 -Example buses`, which attaches the

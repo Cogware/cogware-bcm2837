@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! VideoCore framebuffer.
 //!
 //! The ARM cannot program the display; the VideoCore owns it. Setting a mode is

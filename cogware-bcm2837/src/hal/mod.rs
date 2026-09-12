@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Peripheral abstraction: owned pins, buses, and the `embedded-hal` traits.
 //!
 //! [`crate::drivers`] is the register layer — one singleton per peripheral,

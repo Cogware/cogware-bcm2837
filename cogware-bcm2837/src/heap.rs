@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Kernel heap: a segregated power-of-two free-list allocator over free DRAM.
 //!
 //! # Shape

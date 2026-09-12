@@ -420,3 +420,9 @@ and in the docs.
 ## Licence
 
 MIT OR Apache-2.0.
+
+## License
+
+GPL-3.0-only. A commercial license is available for firmware you cannot ship
+under the GPL; `LICENSING.md` explains both and how to ask. Sending a patch
+accepts the contributor agreement in `CONTRIBUTING.md`.

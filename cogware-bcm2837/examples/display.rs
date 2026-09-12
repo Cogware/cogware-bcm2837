@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! A small bootable display demo: ask the VideoCore for a framebuffer and draw.
 //!
 //! Run with `cargo run --release --example display`.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage-1 EL1 MMU: identity mapping with per-section permissions.
 //!
 //! # Why the MMU is mandatory here

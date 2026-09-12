@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Timer futures built on the architectural counter.
 //!
 //! There is no timer interrupt, so these are poll-driven: a sleeping task is

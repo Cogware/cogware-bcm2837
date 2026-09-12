@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! A UART chain-loader: receives a kernel over the serial line and boots it,
 //! so the SD card only ever has to be written once.
 //!

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! BCM2837 GPIO controller.
 //!
 //! The single [`Gpio`] instance lives inside a [`crate::sync::SpinLock`] in

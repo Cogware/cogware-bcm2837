@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! SPI and I2C driven directly from GPIO pins, with no peripheral involved.
 //!
 //! The CPU generates every edge, so a transfer is a busy loop. Three reasons

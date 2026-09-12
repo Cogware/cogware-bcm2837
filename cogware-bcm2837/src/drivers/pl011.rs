@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! ARM PL011 UART (UART0), the kernel console.
 //!
 //! On the Raspberry Pi 3 the PL011 is the "real" UART; the mini UART (AUX) is

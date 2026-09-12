@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Core-local AArch64 state: identity, exception level, barriers and the
 //! handful of system registers the rest of the kernel needs.
 

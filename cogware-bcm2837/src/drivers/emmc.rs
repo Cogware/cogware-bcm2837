@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! BCM2837 external mass media controller (EMMC / Arasan SDHCI).
 //!
 //! Drives the Arasan-compatible SDHCI controller wired to the Raspberry Pi 3

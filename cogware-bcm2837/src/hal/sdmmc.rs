@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! `embedded-sdmmc` block device implementation.
 //!
 //! The adapter that lets the `embedded-sdmmc` crate mount a FAT filesystem on

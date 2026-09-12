@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Async pins and buses, on top of [`crate::task`].
 //!
 //! The blocking API spins; this one yields. A task waiting for a pin to change

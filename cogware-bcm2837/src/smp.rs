@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Symmetric multiprocessing: releasing cores 1-3 and tracking who is up.
 //!
 //! # Starting the secondary cores

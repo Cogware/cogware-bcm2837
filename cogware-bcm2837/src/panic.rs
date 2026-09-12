@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Panic handling.
 //!
 //! With four cores and one UART, the panicking core may already hold the

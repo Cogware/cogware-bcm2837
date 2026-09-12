@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Regression checks for guard auto-traits, console exclusion and timer fairness.
 //!
 //! Run with `cargo run --release --example regressions`. Success prints

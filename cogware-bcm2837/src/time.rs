@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Generic counter based timekeeping.
 //!
 //! The ARM generic timer is per-core, always running, and publishes its

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! # cogware-bcm2837
 //!
 //! A bare-metal board support package for the Broadcom **BCM2837** — the

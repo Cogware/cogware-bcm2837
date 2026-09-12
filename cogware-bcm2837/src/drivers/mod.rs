@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Driver layer: raw MMIO access plus the peripherals this kernel needs.
 //!
 //! Every peripheral is a singleton wrapped in a [`SpinLock`], which is how

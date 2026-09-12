@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Build script for the BCM2837 BSP.
 //!
 //! Linker script wiring, in two parts:

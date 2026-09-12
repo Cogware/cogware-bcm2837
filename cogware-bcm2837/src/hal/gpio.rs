@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! Owned GPIO pins, with the mode tracked in the type.
 //!
 //! [`crate::drivers::gpio`] is the register-level driver: one `Gpio` behind one

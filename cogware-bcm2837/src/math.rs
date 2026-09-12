@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 //! Floating-point operations that `core` does not provide.
 //!
 //! `core` gives `f32`/`f64` arithmetic, comparison, `abs`, `min`, `max` and

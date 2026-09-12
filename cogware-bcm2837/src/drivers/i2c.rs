@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! BCM2835 BSC (Broadcom Serial Controller) I2C master.
 //!
 //! Two of the three BSC blocks are useful here: **BSC0** on GPIO 0/1 and

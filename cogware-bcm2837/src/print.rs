@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-only
 //! `print!` / `println!` for the kernel console.
 //!
 //! The macros are `#[macro_export]`ed, so they live at the crate root and are
