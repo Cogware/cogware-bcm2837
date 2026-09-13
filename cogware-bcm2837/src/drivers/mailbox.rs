@@ -219,12 +219,33 @@ impl core::fmt::Display for Error {
     }
 }
 
-/// The shared, 16-byte-aligned property message buffer.
+/// The shared property message buffer.
 ///
 /// Static rather than stack: the VideoCore needs a physical DRAM address, and
-/// the 16-byte alignment is easier to guarantee for a static.
-#[repr(C, align(16))]
+/// the alignment is easier to guarantee for a static.
+///
+/// # Why a whole cache line, not the sixteen bytes the mailbox asks for
+///
+/// The channel is carried in the low four bits of the address, so the
+/// *mailbox* needs only 16-byte alignment. The cache maintenance needs more.
+/// `transact` cleans and invalidates by cache line, and a line is 64 bytes,
+/// so it rounds the buffer's address down to the start of the line it begins
+/// in. At 16-byte alignment that line can hold up to 48 bytes of whatever
+/// static the linker put before this one.
+///
+/// With one core that is harmless — nothing else is writing. With a second
+/// core running it is not: that core can hold the shared line dirty in its
+/// own cache, and its eventual write-back lands on top of a message the
+/// VideoCore has not read yet. The symptom is not a hang but a rejected
+/// message, because the firmware reads a header that no longer says what was
+/// written. `BUFFER_WORDS` is a multiple of a line, so aligning to one gives
+/// the buffer its lines to itself and no neighbour can share them.
+#[repr(C, align(64))]
 struct MessageBuffer([u32; BUFFER_WORDS]);
+
+// The reasoning above only holds while the buffer is a whole number of cache
+// lines; a partial last line could still be shared.
+const _: () = assert!(core::mem::size_of::<MessageBuffer>().is_multiple_of(CACHE_LINE));
 
 static mut MESSAGE: MessageBuffer = MessageBuffer([0; BUFFER_WORDS]);
 

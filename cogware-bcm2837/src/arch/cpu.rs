@@ -207,6 +207,25 @@ pub unsafe fn unmask_interrupts() {
 #[derive(Clone, Copy)]
 pub struct InterruptState(u64);
 
+impl InterruptState {
+    /// The saved `DAIF`, for a caller that has to hand it through something
+    /// that carries a plain integer — `critical-section`'s restore state is
+    /// one, and `sync::critical` is why these exist.
+    pub const fn to_raw(self) -> u64 {
+        self.0
+    }
+
+    /// Rebuild a saved mask from [`to_raw`](Self::to_raw).
+    ///
+    /// # Safety
+    ///
+    /// `raw` must have come from `to_raw` on this core, or
+    /// [`restore_interrupts`] will write a mask that was never saved.
+    pub const unsafe fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 /// Masks interrupts and returns the previous mask so it can be restored.
 #[inline(always)]
 pub fn save_and_mask_interrupts() -> InterruptState {

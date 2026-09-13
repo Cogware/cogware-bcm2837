@@ -2,13 +2,16 @@
 //! Cross-core synchronisation primitives.
 //!
 //! All of these rely on `LDXR`/`STXR`, so they may only be used once the
-//! calling core's MMU is enabled. See `spinlock`.
+//! calling core's MMU is enabled. See `spinlock`. `critical` is the
+//! exception: it has to work before the MMU is on, and says how.
 //!
 //! `Once` and some of `SpinLock`'s methods are unused by the boot demo, hence
 //! the `dead_code` allowance.
 #![allow(dead_code)]
 
 mod barrier;
+#[cfg(feature = "critical-section-impl")]
+mod critical;
 mod once;
 mod spinlock;
 
