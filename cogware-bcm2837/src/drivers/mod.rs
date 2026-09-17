@@ -26,6 +26,7 @@ pub mod i2c;
 pub mod mailbox;
 pub mod mmio;
 pub mod pl011;
+pub mod power;
 // Decoding produces a `Vec`, so this is the one module that needs `alloc`.
 #[cfg(feature = "allocator")]
 pub mod qoi;
@@ -46,6 +47,14 @@ pub static GPIO: SpinLock<gpio::Gpio> = SpinLock::new(unsafe { gpio::Gpio::new()
 ///
 /// SAFETY: as above, the only instance.
 pub static UART: SpinLock<pl011::Pl011Uart> = SpinLock::new(unsafe { pl011::Pl011Uart::new() });
+
+/// The power manager, shared by every core.
+///
+/// Only ever used to reset the board, so the lock is there for the same reason
+/// the others are rather than because two cores contend for it.
+///
+/// SAFETY: as above, the only instance.
+pub static POWER: SpinLock<power::Power> = SpinLock::new(unsafe { power::Power::new() });
 
 /// The VideoCore property mailbox, shared by every core.
 ///
