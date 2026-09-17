@@ -38,6 +38,10 @@ __pycache__/
 CLAUDE.md
 AGENTS.md
 
+# The knowledge graph built over this tree. Regenerable with `graphify
+# extract`, and it embeds absolute host paths.
+graphify-out/
+
 # ----------------------------------------------------------- editors and IDEs
 # Visual Studio
 .vs/
