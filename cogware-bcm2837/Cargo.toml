@@ -191,3 +191,31 @@ path = "examples/interrupts.rs"
 test = false
 required-features = ["panic-handler", "allocator"]
 
+# A CSI-2 receiver capturing one frame. Needs a board and a sensor.
+[[example]]
+name = "camera"
+path = "examples/camera.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+# A DSI panel in command mode: DCS bring-up and colour bars. Needs a board.
+[[example]]
+name = "dsi-panel"
+path = "examples/dsi-panel.rs"
+test = false
+required-features = ["panic-handler"]
+
+# A camera frame rendered on HDMI; a synthetic frame without a sensor.
+[[example]]
+name = "camera-preview"
+path = "examples/camera-preview.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+
+# A DSI panel in video mode: background, plane, page flip. Needs a board.
+[[example]]
+name = "dsi-video"
+path = "examples/dsi-video.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+

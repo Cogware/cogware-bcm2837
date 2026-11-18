@@ -21,8 +21,9 @@
 //! * Initialises an O(1) [`heap`] for `Box`, `Vec` and `String`.
 //! * Routes JTAG to GPIO 22-27 and unlocks the debug registers.
 //! * Offers MMIO drivers for GPIO, the VideoCore mailbox, the SD/EMMC
-//!   controller and the framebuffer, each behind a [`sync::SpinLock`] so any
-//!   core may use them.
+//!   controller, the framebuffer, DMA, PWM, the clock manager, the camera
+//!   receivers and the DSI hosts, each behind a [`sync::SpinLock`] so any core
+//!   may use them, and an interrupt dispatcher whose handlers wake tasks.
 //! * Provides a no-`alloc` cooperative [`task`] executor, so each core can run
 //!   an `async` main loop.
 //!
@@ -71,6 +72,12 @@
 //! | `bitbang` | software SPI and I²C against simulated devices |
 //! | `buses` | hardware SPI0 and BSC1, shared across cores |
 //! | `async-bus` | `embedded-hal-async` buses, delays and pin waits |
+//! | `peripherals` | clock manager, system timer, RNG, DMA and PWM |
+//! | `interrupts` | per-core ticks, IPIs and interrupt-driven DMA |
+//! | `camera` | a CSI-2 receiver capturing one frame (hardware only) |
+//! | `dsi-panel` | a DSI panel in command mode (hardware only) |
+//! | `dsi-video` | a DSI panel in video mode (hardware only) |
+//! | `camera-preview` | a raw camera frame rendered on HDMI |
 //! | `shell` | all of the above, interactively |
 //! | `chainloader` | receives a kernel over serial and boots it |
 //!
@@ -103,6 +110,7 @@ pub mod boot;
 pub mod bsp;
 pub mod console;
 pub mod debug;
+pub mod devices;
 pub mod drivers;
 pub mod hal;
 pub mod heap;

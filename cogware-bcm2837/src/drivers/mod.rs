@@ -21,15 +21,19 @@
 //! programs them directly.
 
 pub mod clock;
+pub mod display;
 pub mod dma;
+pub mod dsi;
 pub mod emmc;
 pub mod font;
 pub mod framebuffer;
 pub mod gpio;
+pub mod hvs;
 pub mod i2c;
 pub mod interrupt;
 pub mod mailbox;
 pub mod mmio;
+pub mod pixelvalve;
 pub mod pl011;
 pub mod power;
 pub mod pwm;
@@ -39,6 +43,7 @@ pub mod qoi;
 pub mod rng;
 pub mod spi;
 pub mod systimer;
+pub mod unicam;
 
 use crate::sync::SpinLock;
 
@@ -66,8 +71,8 @@ pub static POWER: SpinLock<power::Power> = SpinLock::new(unsafe { power::Power::
 
 /// The clock manager, shared by every core.
 ///
-/// A leaf lock: drivers that clock themselves ([`PWM`]) take it inside their
-/// own, and it never takes another.
+/// A leaf lock: drivers that clock themselves ([`PWM`], the camera and display
+/// hosts) take it inside their own, and it never takes another.
 ///
 /// SAFETY: as above, the only instance.
 pub static CLOCKS: SpinLock<clock::Clocks> = SpinLock::new(unsafe { clock::Clocks::new() });
@@ -85,6 +90,51 @@ pub static PWM: SpinLock<pwm::Pwm> = SpinLock::new(unsafe { pwm::Pwm::new() });
 ///
 /// SAFETY: as above, the only instance.
 pub static RNG: SpinLock<rng::Rng> = SpinLock::new(unsafe { rng::Rng::new() });
+
+/// Unicam receiver 0 (`CAM0`, two lanes), shared by every core.
+///
+/// Power it with `unicam::power_on` before `Unicam::start`.
+///
+/// SAFETY: as above, the only instance for this port.
+pub static CAM0: SpinLock<unicam::Unicam> =
+    SpinLock::new(unsafe { unicam::Unicam::new(unicam::Port::Cam0) });
+
+/// Unicam receiver 1 (`CAM1`, four lanes), shared by every core.
+///
+/// SAFETY: as above, the only instance for this port.
+pub static CAM1: SpinLock<unicam::Unicam> =
+    SpinLock::new(unsafe { unicam::Unicam::new(unicam::Port::Cam1) });
+
+/// The DSI0 host (`DISP0`, two lanes), shared by every core.
+///
+/// Power it with `dsi::power_on` before `Dsi::init`.
+///
+/// SAFETY: as above, the only instance for this port.
+pub static DSI0: SpinLock<dsi::Dsi> = SpinLock::new(unsafe { dsi::Dsi::new(dsi::Port::Dsi0) });
+
+/// The DSI1 host (`DISP1`, four lanes), shared by every core.
+///
+/// SAFETY: as above, the only instance for this port.
+pub static DSI1: SpinLock<dsi::Dsi> = SpinLock::new(unsafe { dsi::Dsi::new(dsi::Port::Dsi1) });
+
+/// The HVS display compositor, shared by every core.
+///
+/// The firmware drives channel 1 for HDMI; only channels 0 and 2 are ours.
+///
+/// SAFETY: as above, the only instance.
+pub static HVS: SpinLock<hvs::Hvs> = SpinLock::new(unsafe { hvs::Hvs::new() });
+
+/// Pixel valve 0 (DSI0, DPI), shared by every core.
+///
+/// SAFETY: as above, the only instance for this valve.
+pub static PIXELVALVE0: SpinLock<pixelvalve::PixelValve> =
+    SpinLock::new(unsafe { pixelvalve::PixelValve::new(pixelvalve::Valve::Zero) });
+
+/// Pixel valve 1 (DSI1), shared by every core.
+///
+/// SAFETY: as above, the only instance for this valve.
+pub static PIXELVALVE1: SpinLock<pixelvalve::PixelValve> =
+    SpinLock::new(unsafe { pixelvalve::PixelValve::new(pixelvalve::Valve::One) });
 
 /// The VideoCore property mailbox, shared by every core.
 ///

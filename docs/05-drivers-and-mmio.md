@@ -386,19 +386,26 @@ bring-up hooks.
 
 ## Locking discipline
 
-The live driver locks are GPIO, UART, MAILBOX, FRAMEBUFFER, EMMC, SPI0, I2C0
-and I2C1.
+The live driver locks are GPIO, UART, MAILBOX, FRAMEBUFFER, EMMC, SPI0, I2C0,
+I2C1, CLOCKS, PWM, RNG, CAM0, CAM1, DSI0, DSI1, HVS, PIXELVALVE0 and
+PIXELVALVE1. DMA channels are not behind a
+lock: a channel is claimed from an atomic mask and then owned outright.
 
-UART, MAILBOX and EMMC are still taken one at a time and never nested. There
-are exactly **two** nested orders, and both need stating explicitly rather than
-being left to be discovered:
+UART, MAILBOX, EMMC, RNG and the camera and display locks are taken one at a
+time and never nested. `unicam::power_on` and `dsi::power_on` take `MAILBOX`
+and then `CLOCKS` one after the other, releasing the first before the second.
+There are exactly **three** nested orders, and they need stating explicitly
+rather than being left to be discovered:
 
 ```text
 FRAMEBUFFER  ->  MAILBOX          allowed, and unavoidable
 MAILBOX      ->  FRAMEBUFFER      forbidden
 
-SPI0/I2C0/I2C1  ->  GPIO          allowed, and unavoidable
-GPIO  ->  SPI0/I2C0/I2C1          forbidden
+SPI0/I2C0/I2C1/PWM  ->  GPIO      allowed, and unavoidable
+GPIO  ->  SPI0/I2C0/I2C1/PWM      forbidden
+
+PWM/DSI0/DSI1  ->  CLOCKS        allowed
+CLOCKS  ->  anything              forbidden: CLOCKS is a leaf
 ```
 
 The first is unavoidable because setting a mode, releasing a buffer and
@@ -430,6 +437,11 @@ spi.init(Config::default());   // takes GPIO while SPI0 is held
 The same appears in the bit-banged buses, whose `OpenDrainPin` transitions are
 `GPFSEL` writes. Nothing ever takes `GPIO` and then a bus lock, so the order is
 again total.
+
+The third is `Pwm::init` and `Dsi::init`, each of which clocks the block it is
+configuring and so programs a generator under `CLOCKS` while holding its own
+lock. `CLOCKS` takes no
+other lock, so it can sit at the bottom of any order.
 
 The *hot* GPIO paths take no lock. `GPSET`, `GPCLR` and `GPEDS` are
 write-1-to-act and `GPLEV` is a pure read, so there is no read-modify-write to

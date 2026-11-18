@@ -137,6 +137,25 @@ pub enum Tag {
     SetVsync = 0x0004_800E,
     /// Blank or unblank the display.
     BlankScreen = 0x0004_0002,
+    /// Power one of the firmware's fine-grained domains, see [`Domain`].
+    SetDomainState = 0x0003_8030,
+}
+
+/// The firmware's fine-grained power domains, for [`Tag::SetDomainState`].
+///
+/// Finer than [`Device`]: these are the blocks behind the camera and display
+/// interfaces, which read back nothing until powered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum Domain {
+    /// Unicam receiver 0 (`CAM0`).
+    Unicam0 = 12,
+    /// Unicam receiver 1 (`CAM1`).
+    Unicam1 = 13,
+    /// The DSI0 host.
+    Dsi0 = 17,
+    /// The DSI1 host.
+    Dsi1 = 18,
 }
 
 /// Clock identifiers accepted by the clock tags.
@@ -562,6 +581,28 @@ impl Mailbox {
         let mut out = [0u32; 2];
         self.call(Tag::SetPowerState, &[device as u32, state], &mut out)?;
         Ok(out[1])
+    }
+}
+
+impl Mailbox {
+    /// Powers a [`Domain`] on or off.
+    ///
+    /// The firmware echoes the domain and its new state; anything less means
+    /// the tag was not understood, which QEMU's emulated firmware does.
+    pub fn set_domain_state(&mut self, domain: Domain, on: bool) -> Result<(), Error> {
+        let mut out = [0u32; 2];
+        let words = self.call(
+            Tag::SetDomainState,
+            &[domain as u32, u32::from(on)],
+            &mut out,
+        )?;
+        if words < 2 {
+            return Err(Error::TagNotAnswered);
+        }
+        if out[1] != u32::from(on) {
+            return Err(Error::Rejected);
+        }
+        Ok(())
     }
 }
 

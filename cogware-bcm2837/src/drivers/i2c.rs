@@ -139,6 +139,8 @@ pub struct I2c {
     block: RegisterBlock<Registers>,
     sda: u8,
     scl: u8,
+    /// The pins' alternate function for this block on these pins.
+    function: Function,
     initialised: bool,
 }
 
@@ -162,6 +164,7 @@ mod tests {
             block: unsafe { RegisterBlock::new(core::ptr::from_ref(&registers).addr()) },
             sda: 2,
             scl: 3,
+            function: Function::Alt0,
             initialised: true,
         };
         test(&mut bus, &registers);
@@ -233,6 +236,7 @@ impl I2c {
             block: unsafe { RegisterBlock::new(map::I2C0) },
             sda: 0,
             scl: 1,
+            function: Function::Alt0,
             initialised: false,
         }
     }
@@ -248,6 +252,7 @@ impl I2c {
             block: unsafe { RegisterBlock::new(map::I2C1) },
             sda: 2,
             scl: 3,
+            function: Function::Alt0,
             initialised: false,
         }
     }
@@ -255,6 +260,24 @@ impl I2c {
     /// The `SDA` and `SCL` pin numbers this instance uses.
     pub const fn pins(&self) -> (u8, u8) {
         (self.sda, self.scl)
+    }
+
+    /// Moves this block to another pin pair it can reach, before [`init`]:
+    /// BSC0 to GPIO 28/29 or 44/45, BSC1 to 44/45. A Compute Module carrier
+    /// commonly wires its camera and display I2C to these. Returns `false`,
+    /// changing nothing, for a pair the block cannot use.
+    ///
+    /// [`init`]: Self::init
+    pub fn use_pins(&mut self, sda: u8, scl: u8) -> bool {
+        let bsc0 = self.block.base_addr() == map::I2C0;
+        let function = match (bsc0, sda, scl) {
+            (true, 0, 1) | (true, 28, 29) | (false, 2, 3) => Function::Alt0,
+            (true, 44, 45) => Function::Alt1,
+            (false, 44, 45) => Function::Alt2,
+            _ => return false,
+        };
+        (self.sda, self.scl, self.function) = (sda, scl, function);
+        true
     }
 
     /// Routes this block's pins and sets the bus to `speed_hz`.
@@ -266,8 +289,8 @@ impl I2c {
     pub fn init(&mut self, speed_hz: u32) {
         {
             let mut gpio = GPIO.lock();
-            gpio.set_function(self.sda, Function::Alt0);
-            gpio.set_function(self.scl, Function::Alt0);
+            gpio.set_function(self.sda, self.function);
+            gpio.set_function(self.scl, self.function);
             // A real bus needs external pull-ups; the internal ones are too
             // weak to meet the rise-time spec, but enabling them helps a bench
             // setup with short jumpers.

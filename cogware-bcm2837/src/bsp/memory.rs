@@ -249,6 +249,36 @@ pub mod map {
     /// PWM.
     pub const PWM: usize = PERIPHERAL_BASE + 0x0020_C000;
 
+    /// Pixel valve 0: timing generator for DSI0 and DPI, fed by HVS channel 0.
+    pub const PIXELVALVE0: usize = PERIPHERAL_BASE + 0x0020_6000;
+
+    /// Pixel valve 1: timing generator for DSI1, fed by HVS channel 2.
+    pub const PIXELVALVE1: usize = PERIPHERAL_BASE + 0x0020_7000;
+
+    /// Pixel valve 2: timing generator for HDMI, fed by HVS channel 1. The
+    /// firmware drives it for its own framebuffer.
+    pub const PIXELVALVE2: usize = PERIPHERAL_BASE + 0x0080_7000;
+
+    /// The HVS: the display compositor reading planes from memory.
+    pub const HVS: usize = PERIPHERAL_BASE + 0x0040_0000;
+
+    /// DSI0, the two-lane MIPI DSI host (`DISP0` on the Compute Module).
+    pub const DSI0: usize = PERIPHERAL_BASE + 0x0020_9000;
+
+    /// DSI1, the four-lane MIPI DSI host (`DISP1`; the Pi 3's display
+    /// connector).
+    pub const DSI1: usize = PERIPHERAL_BASE + 0x0070_0000;
+
+    /// Unicam receiver 0, two-lane CSI-2 (`CAM0` on the Compute Module).
+    pub const CAM0: usize = PERIPHERAL_BASE + 0x0080_0000;
+
+    /// Unicam receiver 1, four-lane CSI-2 (`CAM1`; the Pi 3's camera
+    /// connector).
+    pub const CAM1: usize = PERIPHERAL_BASE + 0x0080_1000;
+
+    /// Camera interface clock gates: one word per receiver, CAM0 then CAM1.
+    pub const CMI: usize = PERIPHERAL_BASE + 0x0080_2000;
+
     /// AUX block containing the mini UART (UART1), SPI1 and SPI2.
     pub const AUX: usize = PERIPHERAL_BASE + 0x0021_5000;
 

@@ -159,7 +159,7 @@ impl PixelOrder {
 
     /// Converts a word read back out of the surface into a canonical colour.
     #[inline(always)]
-    const fn decode(self, word: u32) -> Color {
+    pub const fn decode(self, word: u32) -> Color {
         match self {
             Self::Bgr => Color::argb(
                 (word >> 24) as u8,
@@ -178,7 +178,7 @@ impl PixelOrder {
 
     /// Converts a canonical colour into the word the hardware expects.
     #[inline(always)]
-    const fn encode(self, color: Color) -> u32 {
+    pub const fn encode(self, color: Color) -> u32 {
         match self {
             Self::Bgr => color.to_argb(),
             Self::Rgb => {
@@ -717,9 +717,238 @@ impl Framebuffer {
         unsafe { core::slice::from_raw_parts(start as *const u32, words) }
     }
 
+    /// A [`Canvas`] over the drawing page, or `None` before [`init`](Self::init).
+    pub fn canvas(&mut self) -> Option<Canvas<'_>> {
+        if !self.ready {
+            return None;
+        }
+        let (width, height, stride_words, order) =
+            (self.width, self.height, self.stride_words, self.order);
+        Some(Canvas {
+            pixels: self.surface(),
+            width,
+            height,
+            stride_words,
+            order,
+        })
+    }
+
+    /// Converts a colour into the word this surface stores.
+    pub fn encode(&self, color: Color) -> u32 {
+        self.order.encode(color)
+    }
+
+    /// Converts a word from this surface back into a colour.
+    pub fn decode(&self, word: u32) -> Color {
+        self.order.decode(word)
+    }
+
+    /// One row of the drawing page; see [`Canvas::scanline`].
+    pub fn scanline(&mut self, y: u32) -> Option<&mut [u32]> {
+        if !self.ready || y >= self.height {
+            return None;
+        }
+        let (start, width) = (y as usize * self.stride_words, self.width as usize);
+        Some(&mut self.surface()[start..start + width])
+    }
+
+    /// Reads one pixel back from the drawing page; see [`Canvas::read`].
+    pub fn read(&self, x: u32, y: u32) -> Option<Color> {
+        if !self.ready || x >= self.width || y >= self.height {
+            return None;
+        }
+        let index = y as usize * self.stride_words + x as usize;
+        Some(self.order.decode(self.surface_ref()[index]))
+    }
+
+    /// See [`Canvas::clear`].
+    pub fn clear(&mut self, color: Color) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.clear(color);
+        }
+    }
+
+    /// See [`Canvas::pixel`].
+    #[inline]
+    pub fn pixel(&mut self, x: u32, y: u32, color: Color) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.pixel(x, y, color);
+        }
+    }
+
+    /// See [`Canvas::fill_rect`].
+    pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.fill_rect(x, y, width, height, color);
+        }
+    }
+
+    /// See [`Canvas::draw_rect`].
+    pub fn draw_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.draw_rect(x, y, width, height, color);
+        }
+    }
+
+    /// See [`Canvas::line`].
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.line(x0, y0, x1, y1, color);
+        }
+    }
+
+    /// See [`Canvas::blit`].
+    pub fn blit(&mut self, x: u32, y: u32, image: &Image<'_>) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.blit(x, y, image);
+        }
+    }
+
+    /// See [`Canvas::blit_blend`].
+    pub fn blit_blend(&mut self, x: u32, y: u32, image: &Image<'_>) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.blit_blend(x, y, image);
+        }
+    }
+
+    /// See [`Canvas::draw_char_scaled`].
+    pub fn draw_char_scaled(
+        &mut self,
+        x: u32,
+        y: u32,
+        character: char,
+        foreground: Color,
+        background: Option<Color>,
+        scale: u32,
+    ) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.draw_char_scaled(x, y, character, foreground, background, scale);
+        }
+    }
+
+    /// See [`Canvas::draw_text`].
+    pub fn draw_text(
+        &mut self,
+        x: u32,
+        y: u32,
+        text: &str,
+        foreground: Color,
+        background: Option<Color>,
+    ) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.draw_text(x, y, text, foreground, background);
+        }
+    }
+
+    /// See [`Canvas::draw_text_scaled`].
+    pub fn draw_text_scaled(
+        &mut self,
+        x: u32,
+        y: u32,
+        text: &str,
+        foreground: Color,
+        background: Option<Color>,
+        scale: u32,
+    ) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.draw_text_scaled(x, y, text, foreground, background, scale);
+        }
+    }
+
+    /// See [`Canvas::text_width`].
+    pub fn text_width(text: &str, scale: u32) -> u32 {
+        Canvas::text_width(text, scale)
+    }
+
+    /// See [`Canvas::draw_fmt`].
+    pub fn draw_fmt(
+        &mut self,
+        x: u32,
+        y: u32,
+        arguments: core::fmt::Arguments<'_>,
+        foreground: Color,
+        background: Option<Color>,
+    ) {
+        if let Some(mut canvas) = self.canvas() {
+            canvas.draw_fmt(x, y, arguments, foreground, background);
+        }
+    }
+}
+
+/// A drawing surface: rows of 32-bit pixels in memory, in either channel
+/// order, with the clipped 2D primitives, the font and image blits.
+///
+/// [`Framebuffer::canvas`] lends one over the HDMI framebuffer's drawing
+/// page; [`Canvas::new`] wraps any other buffer, such as a DSI display's
+/// plane or an off-screen image.
+pub struct Canvas<'a> {
+    pixels: &'a mut [u32],
+    width: u32,
+    height: u32,
+    stride_words: usize,
+    order: PixelOrder,
+}
+
+impl<'a> Canvas<'a> {
+    /// Wraps `pixels`: `height` rows of `width` visible pixels, each row
+    /// starting `stride_words` after the last. `None` if the slice is too
+    /// short for that shape or a row is wider than its stride.
+    pub fn new(
+        pixels: &'a mut [u32],
+        width: u32,
+        height: u32,
+        stride_words: usize,
+        order: PixelOrder,
+    ) -> Option<Self> {
+        let rows = height as usize;
+        let needed = if rows == 0 {
+            0
+        } else {
+            (rows - 1) * stride_words + width as usize
+        };
+        (width as usize <= stride_words && pixels.len() >= needed).then_some(Self {
+            pixels,
+            width,
+            height,
+            stride_words,
+            order,
+        })
+    }
+
+    /// Visible width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in rows.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The channel order pixels are stored in, for writing rows directly.
+    pub fn order(&self) -> PixelOrder {
+        self.order
+    }
+
+    /// A canvas over the `width` x `height` rectangle at (`x`, `y`), clipped
+    /// to this one: drawing at its origin lands at (`x`, `y`) here. `None` if
+    /// nothing of the rectangle is inside.
+    pub fn sub(&mut self, x: u32, y: u32, width: u32, height: u32) -> Option<Canvas<'_>> {
+        let (x, y, width, height) = self.clip(x, y, width, height)?;
+        let start = y as usize * self.stride_words + x as usize;
+        let end = start + (height as usize - 1) * self.stride_words + width as usize;
+        Some(Canvas {
+            pixels: &mut self.pixels[start..end],
+            width,
+            height,
+            stride_words: self.stride_words,
+            order: self.order,
+        })
+    }
+
     /// Converts a colour into the word this surface stores.
     ///
-    /// Needed by anything writing through [`Framebuffer::scanline`], which
+    /// Needed by anything writing through [`Canvas::scanline`], which
     /// hands out raw words: the firmware picks the channel order at mode set,
     /// so a caller cannot assume it.
     pub fn encode(&self, color: Color) -> u32 {
@@ -740,9 +969,9 @@ impl Framebuffer {
     /// # Why this exists
     ///
     /// Every primitive here funnels through one private accessor, and
-    /// [`Framebuffer::pixel`] rebuilds that slice on every call. That makes a
+    /// [`Canvas::pixel`] rebuilds that slice on every call. That makes a
     /// per-pixel loop through the public API roughly twenty-five times more
-    /// expensive per pixel than [`Framebuffer::fill_rect`], measured on a
+    /// expensive per pixel than [`Canvas::fill_rect`], measured on a
     /// Pi 3 — and the difference is the call, not the write. Anything doing its
     /// own per-pixel work, such as compositing or anti-aliasing, should take a
     /// row and write it directly rather than paying that cost per pixel.
@@ -750,17 +979,17 @@ impl Framebuffer {
     /// The borrow is exclusive for as long as the slice lives, so nothing else
     /// can be drawing while a row is held.
     pub fn scanline(&mut self, y: u32) -> Option<&mut [u32]> {
-        if !self.ready || y >= self.height {
+        if y >= self.height {
             return None;
         }
         let (start, width) = (y as usize * self.stride_words, self.width as usize);
-        Some(&mut self.surface()[start..start + width])
+        Some(&mut self.pixels[start..start + width])
     }
 
     /// Reads one pixel back from the drawing page.
     ///
-    /// The counterpart to [`Framebuffer::pixel`], and the thing that makes a
-    /// caller's own alpha compositing possible: [`Framebuffer::blit_blend`] is
+    /// The counterpart to [`Canvas::pixel`], and the thing that makes a
+    /// caller's own alpha compositing possible: [`Canvas::blit_blend`] is
     /// the only blend in the BSP, and on non-cacheable framebuffer memory its
     /// destination read is most of its cost. A caller that can avoid the read —
     /// because it knows what it drew — should; one that cannot now has a way to
@@ -769,49 +998,43 @@ impl Framebuffer {
     /// Returns `None` outside the surface rather than a black pixel, so a bug
     /// in the caller's geometry does not read as valid data.
     pub fn read(&self, x: u32, y: u32) -> Option<Color> {
-        if !self.ready || x >= self.width || y >= self.height {
+        if x >= self.width || y >= self.height {
             return None;
         }
         let index = y as usize * self.stride_words + x as usize;
-        Some(self.order.decode(self.surface_ref()[index]))
+        Some(self.order.decode(self.pixels[index]))
     }
 
     /// Fills the whole drawing page with one colour.
     pub fn clear(&mut self, color: Color) {
-        if !self.ready {
-            return;
-        }
         let word = self.order.encode(color);
-        self.surface().fill(word);
+        self.pixels.fill(word);
     }
 
     /// Sets one pixel. Coordinates outside the surface are ignored.
     ///
     /// Convenient for a handful of pixels and the wrong tool for a loop: it
     /// clips and rebuilds the surface slice on every call, which costs far more
-    /// than the write. Use [`Framebuffer::scanline`] for per-pixel work, and
-    /// [`Framebuffer::fill_rect`] for anything that is a span.
+    /// than the write. Use [`Canvas::scanline`] for per-pixel work, and
+    /// [`Canvas::fill_rect`] for anything that is a span.
     #[inline]
     pub fn pixel(&mut self, x: u32, y: u32, color: Color) {
-        if !self.ready || x >= self.width || y >= self.height {
+        if x >= self.width || y >= self.height {
             return;
         }
         let word = self.order.encode(color);
         let index = y as usize * self.stride_words + x as usize;
-        self.surface()[index] = word;
+        self.pixels[index] = word;
     }
 
     /// Fills an axis-aligned rectangle, clipped to the surface.
     pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
-        if !self.ready {
-            return;
-        }
         let Some((x, y, width, height)) = self.clip(x, y, width, height) else {
             return;
         };
         let word = self.order.encode(color);
         let stride = self.stride_words;
-        let surface = self.surface();
+        let surface = &mut *self.pixels;
         for row in y..y + height {
             let start = row as usize * stride + x as usize;
             surface[start..start + width as usize].fill(word);
@@ -831,9 +1054,6 @@ impl Framebuffer {
 
     /// Draws a line with Bresenham's algorithm, clipped per pixel.
     pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
-        if !self.ready {
-            return;
-        }
         let (mut x, mut y) = (x0, y0);
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
@@ -863,12 +1083,9 @@ impl Framebuffer {
     /// Copies an image onto the surface, ignoring its alpha channel.
     ///
     /// The image is in [`Color`]'s canonical order, so this also converts to
-    /// whatever the firmware negotiated. Use [`Framebuffer::blit_blend`] for
+    /// whatever the firmware negotiated. Use [`Canvas::blit_blend`] for
     /// images with transparency.
     pub fn blit(&mut self, x: u32, y: u32, image: &Image<'_>) {
-        if !self.ready {
-            return;
-        }
         let Some((x, y, width, height)) = self.clip(x, y, image.width, image.height) else {
             return;
         };
@@ -876,7 +1093,7 @@ impl Framebuffer {
         let stride = self.stride_words;
         let source_stride = image.stride as usize;
         let pixels = image.pixels;
-        let surface = self.surface();
+        let surface = &mut *self.pixels;
 
         for row in 0..height as usize {
             let destination = (y as usize + row) * stride + x as usize;
@@ -893,12 +1110,9 @@ impl Framebuffer {
     /// transparent and fully opaque pixels take shortcuts.
     ///
     /// The destination is read back to blend, so this is slower than
-    /// [`Framebuffer::blit`]: on non-cacheable framebuffer memory a read is a
+    /// [`Canvas::blit`]: on non-cacheable framebuffer memory a read is a
     /// full trip to DRAM. Use the opaque path when there is no alpha.
     pub fn blit_blend(&mut self, x: u32, y: u32, image: &Image<'_>) {
-        if !self.ready {
-            return;
-        }
         let Some((x, y, width, height)) = self.clip(x, y, image.width, image.height) else {
             return;
         };
@@ -906,7 +1120,7 @@ impl Framebuffer {
         let stride = self.stride_words;
         let source_stride = image.stride as usize;
         let pixels = image.pixels;
-        let surface = self.surface();
+        let surface = &mut *self.pixels;
 
         for row in 0..height as usize {
             let destination = (y as usize + row) * stride + x as usize;
@@ -948,7 +1162,7 @@ impl Framebuffer {
         background: Option<Color>,
         scale: u32,
     ) {
-        if !self.ready || scale == 0 {
+        if scale == 0 {
             return;
         }
         let rows = font::glyph(character);
@@ -956,7 +1170,7 @@ impl Framebuffer {
         let unlit = background.map(|color| self.order.encode(color));
         let stride = self.stride_words;
         let (width, height) = (self.width, self.height);
-        let surface = self.surface();
+        let surface = &mut *self.pixels;
 
         for (row, bits) in rows.iter().enumerate() {
             for row_repeat in 0..scale {
@@ -1078,7 +1292,7 @@ fn mapped_for_videocore(base: usize, size: usize) -> bool {
     base >= start && last <= end
 }
 
-/// A small stack-allocated sink for [`Framebuffer::draw_fmt`].
+/// A small stack-allocated sink for [`Canvas::draw_fmt`].
 struct TextBuffer {
     bytes: [u8; 128],
     used: usize,
