@@ -415,6 +415,12 @@ pub mod bus {
         (physical as u32) | ALIAS_UNCACHED
     }
 
+    /// Converts an ARM physical peripheral address, one of the [`super::map`]
+    /// constants, to the bus address a DMA engine must be given for it.
+    pub const fn peripheral(physical: usize) -> u32 {
+        (physical - super::PERIPHERAL_BASE) as u32 + PERIPHERAL_BASE
+    }
+
     /// Converts a VideoCore bus address back to an ARM physical address.
     pub const fn to_physical(bus: u32) -> usize {
         (bus & !ALIAS_MASK) as usize

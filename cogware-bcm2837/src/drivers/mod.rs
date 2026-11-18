@@ -15,22 +15,30 @@
 //!    wrap it in an [`mmio::RegisterBlock`], so offsets are compiler-checked.
 //! 3. Add a `pub static` here wrapping it in a [`SpinLock`].
 //!
-//! Anything the VideoCore owns — clocks, power domains, the framebuffer — is
-//! not an MMIO peripheral and goes through [`mailbox`] instead.
+//! Anything the VideoCore owns — the ARM and core clocks, power domains, the
+//! framebuffer — is not an MMIO peripheral and goes through [`mailbox`]
+//! instead. The peripheral clock generators are the exception: [`clock`]
+//! programs them directly.
 
+pub mod clock;
+pub mod dma;
 pub mod emmc;
 pub mod font;
 pub mod framebuffer;
 pub mod gpio;
 pub mod i2c;
+pub mod interrupt;
 pub mod mailbox;
 pub mod mmio;
 pub mod pl011;
 pub mod power;
+pub mod pwm;
 // Decoding produces a `Vec`, so this is the one module that needs `alloc`.
 #[cfg(feature = "allocator")]
 pub mod qoi;
+pub mod rng;
 pub mod spi;
+pub mod systimer;
 
 use crate::sync::SpinLock;
 
@@ -55,6 +63,28 @@ pub static UART: SpinLock<pl011::Pl011Uart> = SpinLock::new(unsafe { pl011::Pl01
 ///
 /// SAFETY: as above, the only instance.
 pub static POWER: SpinLock<power::Power> = SpinLock::new(unsafe { power::Power::new() });
+
+/// The clock manager, shared by every core.
+///
+/// A leaf lock: drivers that clock themselves ([`PWM`]) take it inside their
+/// own, and it never takes another.
+///
+/// SAFETY: as above, the only instance.
+pub static CLOCKS: SpinLock<clock::Clocks> = SpinLock::new(unsafe { clock::Clocks::new() });
+
+/// The PWM controller, shared by every core.
+///
+/// Starts unclocked; call `Pwm::init` before configuring a channel.
+///
+/// SAFETY: as above, the only instance.
+pub static PWM: SpinLock<pwm::Pwm> = SpinLock::new(unsafe { pwm::Pwm::new() });
+
+/// The hardware random number generator, shared by every core.
+///
+/// Call `Rng::init` once before reading.
+///
+/// SAFETY: as above, the only instance.
+pub static RNG: SpinLock<rng::Rng> = SpinLock::new(unsafe { rng::Rng::new() });
 
 /// The VideoCore property mailbox, shared by every core.
 ///

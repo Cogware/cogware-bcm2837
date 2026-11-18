@@ -271,9 +271,7 @@ pub type IrqHandler = fn(&mut TrapFrame);
 
 /// Installs the IRQ callback. Replaces any previous one.
 ///
-/// Unused until the BCM2837 interrupt controller lands; the vector table
-/// already routes IRQs here.
-#[allow(dead_code)]
+/// `drivers::interrupt::init` installs its dispatcher here.
 pub fn set_irq_handler(handler: IrqHandler) {
     IRQ_HANDLER.store(handler as usize, Ordering::Release);
 }

@@ -19,7 +19,11 @@ use core::fmt::Write;
 
 use cogware_bcm2837::{
     BootInfo, console, cpu,
-    drivers::{self, emmc::BLOCK_SIZE},
+    drivers::{
+        self,
+        dma::{self, Kind},
+        emmc::BLOCK_SIZE,
+    },
     entry, println, time,
 };
 
@@ -44,9 +48,10 @@ fn main(boot: BootInfo) -> ! {
 
     let read_ok = read_mbr();
     let write_ok = write_read_verify();
+    let dma_ok = dma_round_trip();
 
     println!();
-    if card_ok && read_ok && write_ok {
+    if card_ok && read_ok && write_ok && dma_ok {
         println!("Summary: PASS.");
     } else {
         println!("Summary: FAIL.");
@@ -154,6 +159,47 @@ fn read_mbr() -> bool {
     }
 
     true
+}
+
+/// Four blocks written by DMA, read back by DMA and by programmed I/O; all
+/// three must agree. Uses blocks 2-5, after the single-block scratch.
+fn dma_round_trip() -> bool {
+    /// Word alignment, which the DMA path needs.
+    #[repr(C, align(4))]
+    struct Blocks([u8; 4 * BLOCK_SIZE]);
+
+    let Some(mut channel) = dma::claim(Kind::Any) else {
+        println!("DMA round trip    : FAIL, no channel free");
+        return false;
+    };
+    let mut written = Blocks([0; 4 * BLOCK_SIZE]);
+    for (index, byte) in written.0.iter_mut().enumerate() {
+        *byte = (index as u8) ^ (index >> 8) as u8 ^ 0x5a;
+    }
+    let mut by_dma = Blocks([0; 4 * BLOCK_SIZE]);
+    let mut by_pio = Blocks([0; 4 * BLOCK_SIZE]);
+
+    let mut emmc = drivers::EMMC.lock();
+    let started = time::ticks();
+    let write = emmc.write_blocks_dma(&mut channel, SCRATCH_BLOCK + 1, &written.0);
+    let read =
+        write.and_then(|()| emmc.read_blocks_dma(&mut channel, SCRATCH_BLOCK + 1, &mut by_dma.0));
+    let ticks = time::ticks() - started;
+    let pio = emmc.read_blocks(SCRATCH_BLOCK + 1, &mut by_pio.0);
+    drop(emmc);
+
+    let ok = read.is_ok() && pio.is_ok() && written.0 == by_dma.0 && written.0 == by_pio.0;
+    println!();
+    println!(
+        "DMA round trip    : {} (channel {}, 4 blocks out and back in {} us)",
+        pass_fail(ok),
+        channel.index(),
+        ticks * 1_000_000 / time::frequency_hz().max(1)
+    );
+    if !ok {
+        println!("  dma {read:?}, pio {pio:?}");
+    }
+    ok
 }
 
 fn write_read_verify() -> bool {

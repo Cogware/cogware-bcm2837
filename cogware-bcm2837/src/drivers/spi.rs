@@ -40,9 +40,13 @@
 //! so the bit is really write-1-to-clear or a silicon bug. Linux does the same.
 #![allow(dead_code)]
 
-use super::mmio::{ReadWrite, RegisterBlock};
+use super::{
+    dma,
+    mmio::{ReadWrite, RegisterBlock},
+};
 use crate::{
-    bsp::memory::map,
+    arch::mmu,
+    bsp::memory::{bus, map},
     drivers::{GPIO, gpio::Function},
 };
 
@@ -213,6 +217,13 @@ struct Registers {
 }
 
 const _: () = assert!(core::mem::offset_of!(Registers, clk) == 0x08);
+const _: () = assert!(core::mem::offset_of!(Registers, fifo) == FIFO_OFFSET);
+
+/// The FIFO's offset, for a DMA control block.
+const FIFO_OFFSET: usize = 0x04;
+
+/// The longest DMA chunk: `DLEN` is sixteen bits, rounded down to a word.
+const DMA_MAX_DLEN: usize = 0xfffc;
 const _: () = assert!(core::mem::offset_of!(Registers, dc) == 0x14);
 
 /// The SPI0 master.
@@ -426,6 +437,89 @@ impl Spi0 {
         let result = self
             .pump(read, write, length)
             .and_then(|()| self.wait_done());
+        if standalone {
+            self.end();
+        }
+        result
+    }
+
+    /// [`transfer`](Self::transfer) by DMA, on two channels the caller has
+    /// claimed: `tx` feeds the FIFO, `rx` drains it.
+    ///
+    /// Both slices must be the same length. The FIFO is fed in 32-bit words,
+    /// so DMA is used only when both are word-aligned and a multiple of four
+    /// bytes long; anything else quietly takes the programmed-I/O path.
+    pub fn transfer_dma(
+        &mut self,
+        tx: &mut dma::Channel,
+        rx: &mut dma::Channel,
+        read: &mut [u8],
+        write: &[u8],
+    ) -> Result<(), Error> {
+        let length = read.len();
+        let aligned = |address: usize| address.is_multiple_of(4);
+        if write.len() != length
+            || !length.is_multiple_of(4)
+            || !aligned(read.as_ptr() as usize)
+            || !aligned(write.as_ptr() as usize)
+        {
+            return self.transfer(read, write);
+        }
+        if length == 0 {
+            return Ok(());
+        }
+
+        let standalone = !self.transaction_active;
+        if standalone {
+            self.begin();
+        }
+        // SAFETY: both buffers are borrowed for the whole call, and every
+        // chunk is waited for before the next starts or the call returns.
+        unsafe {
+            mmu::clean_invalidate_range(write.as_ptr() as usize, length);
+            mmu::clean_invalidate_range(read.as_ptr() as usize, length);
+        }
+
+        // `DLEN` is sixteen bits; keep each chunk a whole number of words.
+        let chunk = (DMA_MAX_DLEN).min(tx.max_length()).min(rx.max_length());
+        let fifo = bus::peripheral(map::SPI0 + FIFO_OFFSET);
+        let mut done = 0;
+        let mut result = Ok(());
+        while done < length && result.is_ok() {
+            let size = chunk.min(length - done);
+            let regs = self.block.regs();
+            regs.dlen.write(size as u32);
+            regs.cs.modify(|value| value | CS_DMAEN);
+
+            let receive = dma::ControlBlock::new(
+                dma::ti::SRC_DREQ | dma::ti::DEST_INC | dma::ti::permap(dma::Dreq::Spi0Rx),
+                fifo,
+                bus::to_bus(read.as_ptr() as usize + done),
+                size as u32,
+            );
+            let send = dma::ControlBlock::new(
+                dma::ti::SRC_INC
+                    | dma::ti::DEST_DREQ
+                    | dma::ti::WAIT_RESP
+                    | dma::ti::permap(dma::Dreq::Spi0Tx),
+                bus::to_bus(write.as_ptr() as usize + done),
+                fifo,
+                size as u32,
+            );
+            // SAFETY: the blocks name only the two borrowed buffers and the
+            // FIFO, and both channels are waited for below. Receive starts
+            // first so it is listening before the first byte is clocked.
+            result = unsafe { rx.submit(receive).and_then(|()| tx.submit(send)) }
+                .and_then(|()| tx.wait())
+                .and_then(|()| rx.wait())
+                .map_err(|_| Error::Timeout)
+                .and_then(|()| self.wait_done());
+            self.block.regs().cs.modify(|value| value & !CS_DMAEN);
+            done += size;
+        }
+
+        // SAFETY: as above; drops anything prefetched into `read` meanwhile.
+        unsafe { mmu::clean_invalidate_range(read.as_ptr() as usize, length) };
         if standalone {
             self.end();
         }

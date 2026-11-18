@@ -496,6 +496,34 @@ pub unsafe fn clean_invalidate_line(address: usize) {
     }
 }
 
+/// Cleans and invalidates every cache line overlapping `[start, start + len)`
+/// to the point of coherency.
+///
+/// What a buffer shared with a DMA engine needs on both sides of a transfer:
+/// before, so the engine reads what the core wrote and no dirty line can be
+/// evicted over its output; after, so the core does not read lines it
+/// speculatively refilled mid-transfer. Clean-and-invalidate rather than a bare
+/// invalidate, because a line straddling the buffer's edge may hold someone
+/// else's unwritten data.
+///
+/// # Safety
+///
+/// The whole range must be mapped.
+pub unsafe fn clean_invalidate_range(start: usize, len: usize) {
+    const LINE: usize = 64;
+    let end = start.saturating_add(len);
+    let mut line = start & !(LINE - 1);
+    while line < end {
+        // SAFETY: `line` lies within a cache line of the mapped range.
+        unsafe {
+            core::arch::asm!("dc civac, {addr}", addr = in(reg) line, options(nostack, preserves_flags));
+        }
+        line += LINE;
+    }
+    // SAFETY: a barrier has no memory effects of its own.
+    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
 /// Cleans and invalidates every data cache level to the point of coherency.
 ///
 /// Turning the data cache off does not empty it: lines stay resident and dirty,

@@ -39,6 +39,7 @@ use cogware_bcm2837::{
     cpu,
     drivers::{
         I2C1, SPI0,
+        dma::{self, Kind},
         i2c::{self, SPEED_STANDARD},
         spi::{self, ChipSelect, Config, MODE_0},
     },
@@ -405,6 +406,39 @@ fn spi_demo() {
         verdict(
             injected == Err(spi::Error::Timeout) && result.is_ok() && recovered[1..] == expected,
         )
+    );
+
+    // Last, because under QEMU it leaves the flash mid-command.
+    spi_dma_check(expected);
+}
+
+/// The JEDEC ID again, by DMA: four bytes, the smallest transfer that takes
+/// the DMA path, so the answer is known.
+///
+/// Fails under stock QEMU, whose DMA ignores the SPI data requests: the
+/// receive channel drains an empty FIFO before the first byte is sent. The
+/// cogware QEMU fork paces both channels as hardware does, and passes.
+fn spi_dma_check(expected: [u8; 3]) {
+    /// Word alignment, which the DMA path needs.
+    #[repr(C, align(4))]
+    struct Frame([u8; 4]);
+
+    let command = Frame([0x9F, 0, 0, 0]);
+    let mut reply = Frame([0; 4]);
+    let (Some(mut tx), Some(mut rx)) = (dma::claim(Kind::Lite), dma::claim(Kind::Lite)) else {
+        println!("  JEDEC ID by DMA: FAIL, no lite channels free");
+        return;
+    };
+    let result = SPI0.with(|bus| bus.transfer_dma(&mut tx, &mut rx, &mut reply.0, &command.0));
+    println!(
+        "  JEDEC ID by DMA (channels {} and {}): {} {:02X?} {result:?}",
+        tx.index(),
+        rx.index(),
+        verdict(result.is_ok() && reply.0[1..] == expected),
+        &reply.0[1..],
+    );
+    println!(
+        "    (needs DREQ pacing: fails on stock QEMU, passes on the cogware fork and a board)"
     );
 }
 

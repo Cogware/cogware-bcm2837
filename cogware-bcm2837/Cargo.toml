@@ -175,3 +175,19 @@ name = "chainloader"
 path = "examples/chainloader.rs"
 test = false
 required-features = ["panic-handler", "allocator"]
+
+# The clock manager, system timer, RNG, DMA and PWM, each checked once.
+[[example]]
+name = "peripherals"
+path = "examples/peripherals.rs"
+test = false
+required-features = ["panic-handler"]
+
+# Per-core timer ticks, IPIs, a system-timer match and a DMA completion
+# interrupt waking a task.
+[[example]]
+name = "interrupts"
+path = "examples/interrupts.rs"
+test = false
+required-features = ["panic-handler", "allocator"]
+

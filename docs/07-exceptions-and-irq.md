@@ -251,26 +251,20 @@ pointer avoids blocking in the IRQ path.
 If no handler is installed, the IRQ path prints an unexpected-IRQ message
 (`cogware-bcm2837\src\arch\exception.rs`).
 
-## IRQ work not yet implemented
+## The interrupt controller
 
-The BCM2837 interrupt controller driver is not wired yet. The actionable
-hardware facts are:
+`drivers::interrupt::init` installs its dispatcher in this slot. The dispatcher
+reads the calling core's ARM-local `IRQ_SOURCE` register and handles, in order,
+the core's virtual-timer tick, mailbox 0 (inter-processor interrupts) and the
+"GPU" source, which carries the SoC's 64 peripheral interrupts and is routed to
+core 0. The controller itself, its handler table and the per-core tick are in
+[24-interrupts.md](24-interrupts.md).
 
-* controller base: `0x3F00_B200`, `map::IRQ_CONTROLLER` at
-  `cogware-bcm2837\src\bsp\memory.rs`;
-* PL011 UART0 interrupt: IRQ 57, bit 25 of `pending_2`;
-* ARM-local timer: `0x4000_0000`, `ARM_LOCAL_BASE` at
-  `cogware-bcm2837\src\bsp\memory.rs`.
-
-The PL011 side already has hooks. `Pl011Uart::enable_rx_interrupts` sets
-`RXIM | RTIM` in `IMSC` (`cogware-bcm2837\src\drivers\pl011.rs`), and
-`Pl011Uart::clear_interrupts` writes `ICR_ALL`
-(`cogware-bcm2837\src\drivers\pl011.rs`). They are currently `#[allow(dead_code)]`
-because the console is polled.
-
-A future interrupt-driven console should initialise PL011, clear stale UART
-interrupts, enable PL011 receive interrupts, enable IRQ 57 in the controller,
-install an `IrqHandler`, and only then unmask CPU IRQs.
+The PL011 hooks (`Pl011Uart::enable_rx_interrupts`, `clear_interrupts`) are
+still unused: the console is polled, and with a tick running it is polled at
+the tick rate. Making it interrupt-driven means registering a handler for IRQ
+57 that acknowledges with `ICR_ALL` and wakes the task awaiting the byte, and
+that handler must not take `UART`.
 
 ## Relationship to SMP and MMU state
 

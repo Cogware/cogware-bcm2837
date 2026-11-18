@@ -4,7 +4,8 @@
 //! Drives the Arasan-compatible SDHCI controller wired to the Raspberry Pi 3
 //! micro-SD slot: brings the card up from reset, negotiates bus width and
 //! clock rate, and services 512-byte block reads/writes through the
-//! controller's programmed-I/O FIFO (`EMMC_DATA`). DMA is not implemented.
+//! controller's `EMMC_DATA` register, by programmed I/O or by system DMA paced
+//! by the controller's data request.
 //!
 //! The command sequence, register writes, interrupt-wait discipline and CSD /
 //! CID decoding are adapted from `SDCard.c` by Leon de Boer (LdB) and treated
@@ -41,8 +42,15 @@
 
 use core::fmt;
 
-use super::mmio::{ReadWrite, RegisterBlock};
-use crate::{bsp::memory::map, time};
+use super::{
+    dma,
+    mmio::{ReadWrite, RegisterBlock},
+};
+use crate::{
+    arch::mmu,
+    bsp::memory::{bus, map},
+    time,
+};
 
 /// SD block size in bytes. Fixed at 512; CMD16 (`SET_BLOCKLEN`) programs 512
 /// during initialisation and SDHC/SDXC cards address by block.
@@ -77,7 +85,10 @@ struct Registers {
 }
 
 const _: () = assert!(core::mem::offset_of!(Registers, cmdtm) == 0x0c);
-const _: () = assert!(core::mem::offset_of!(Registers, data) == 0x20);
+const _: () = assert!(core::mem::offset_of!(Registers, data) == DATA_OFFSET);
+
+/// The `DATA` register's offset, for a DMA control block.
+const DATA_OFFSET: usize = 0x20;
 const _: () = assert!(core::mem::offset_of!(Registers, control0) == 0x28);
 const _: () = assert!(core::mem::offset_of!(Registers, interrupt) == 0x30);
 const _: () = assert!(core::mem::offset_of!(Registers, tune_step) == 0x88);
@@ -252,6 +263,8 @@ pub enum Error {
     /// A method that only makes sense on an initialised driver was called
     /// before [`Emmc::init`] succeeded.
     NotInitialised,
+    /// The DMA engine failed or stalled moving the data phase.
+    Dma(super::dma::Error),
 }
 
 impl fmt::Display for Error {
@@ -271,6 +284,7 @@ impl fmt::Display for Error {
             Self::InvalidBuffer => "buffer is not a whole number of blocks",
             Self::OutOfRange => "block address out of range",
             Self::NotInitialised => "driver has not been initialised",
+            Self::Dma(error) => return write!(f, "data phase: {error}"),
         };
         f.write_str(text)?;
         // The status word is the whole content of this error. Folding it away
@@ -1214,6 +1228,7 @@ impl Emmc {
         start_block: u32,
         num_blocks: u32,
         mut transfer: Transfer<'_>,
+        dma: Option<&mut dma::Channel>,
     ) -> Result<(), Error> {
         if self.card_type == CardType::Unknown {
             return Err(Error::NotInitialised);
@@ -1259,10 +1274,42 @@ impl Emmc {
 
         self.send_command_arg(transfer_cmd, block_address)?;
 
+        match dma {
+            Some(channel) if transfer.is_word_aligned() => {
+                self.dma_data(channel, &transfer)?;
+                // The controller raised its ready flags as it went; they were
+                // the DMA request, not something to wait on.
+                self.regs().interrupt.write(ready_int);
+                if !write {
+                    self.wait_for_interrupt(int_bits::DATA_DONE)?;
+                }
+            }
+            _ => self.pio_data(num_blocks, ready_int, &mut transfer)?,
+        }
+
+        if write {
+            self.wait_for_interrupt(int_bits::DATA_DONE)?;
+        }
+
+        // Multi-block transfers without a preceding `SET_BLOCK_COUNT` need an
+        // explicit `STOP_TRANS` to leave the card in the transfer state.
+        if num_blocks > 1 {
+            self.send_command(SdCommand::StopTrans)?;
+        }
+        Ok(())
+    }
+
+    /// Moves the data phase through the `DATA` register, one word at a time.
+    fn pio_data(
+        &mut self,
+        num_blocks: u32,
+        ready_int: u32,
+        transfer: &mut Transfer<'_>,
+    ) -> Result<(), Error> {
         for block in 0..num_blocks as usize {
             self.wait_for_interrupt(ready_int)?;
             let range = block * BLOCK_SIZE..(block + 1) * BLOCK_SIZE;
-            match &mut transfer {
+            match transfer {
                 Transfer::Write(source) => {
                     for chunk in source[range].as_chunks::<4>().0 {
                         self.regs().data.write(u32::from_le_bytes(*chunk));
@@ -1276,16 +1323,52 @@ impl Emmc {
             }
         }
 
-        if write {
-            self.wait_for_interrupt(int_bits::DATA_DONE)?;
-        }
-
-        // Multi-block transfers without a preceding `SET_BLOCK_COUNT` need an
-        // explicit `STOP_TRANS` to leave the card in the transfer state.
-        if num_blocks > 1 {
-            self.send_command(SdCommand::StopTrans)?;
-        }
         Ok(())
+    }
+
+    /// Moves the data phase by DMA, paced by the controller's data request so
+    /// the engine never outruns the card.
+    fn dma_data(
+        &mut self,
+        channel: &mut dma::Channel,
+        transfer: &Transfer<'_>,
+    ) -> Result<(), Error> {
+        let fifo = bus::peripheral(map::EMMC + DATA_OFFSET);
+        let (address, length) = transfer.span();
+        let (info, write) = match transfer {
+            Transfer::Write(_) => (
+                dma::ti::SRC_INC | dma::ti::DEST_DREQ | dma::ti::WAIT_RESP,
+                true,
+            ),
+            Transfer::Read(_) => (dma::ti::SRC_DREQ | dma::ti::DEST_INC, false),
+        };
+        let info = info | dma::ti::permap(dma::Dreq::Emmc);
+
+        // SAFETY: the buffer is borrowed by `transfer` for the whole call,
+        // and every chunk is waited for before the next or the return.
+        unsafe { mmu::clean_invalidate_range(address, length) };
+        // Whole blocks per chunk, so a chunk boundary never splits one.
+        let chunk = channel.max_length() / BLOCK_SIZE * BLOCK_SIZE;
+        let mut done = 0;
+        let mut result = Ok(());
+        while done < length && result.is_ok() {
+            let size = chunk.min(length - done);
+            let memory = bus::to_bus(address + done);
+            let (source, dest) = if write {
+                (memory, fifo)
+            } else {
+                (fifo, memory)
+            };
+            // SAFETY: as above.
+            result =
+                unsafe { channel.submit(dma::ControlBlock::new(info, source, dest, size as u32)) }
+                    .and_then(|()| channel.wait())
+                    .map_err(Error::Dma);
+            done += size;
+        }
+        // SAFETY: as above; drops anything prefetched into a read buffer.
+        unsafe { mmu::clean_invalidate_range(address, length) };
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -1401,21 +1484,8 @@ impl Emmc {
     /// `buffer` must be a non-zero multiple of [`BLOCK_SIZE`]; otherwise
     /// [`Error::InvalidBuffer`] is returned and no I/O happens.
     pub fn read_blocks(&mut self, start_block: u32, buffer: &mut [u8]) -> Result<(), Error> {
-        if !self.initialised {
-            return Err(Error::NotInitialised);
-        }
-        if buffer.is_empty() || !buffer.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::InvalidBuffer);
-        }
-        let num_blocks_usize = buffer.len() / BLOCK_SIZE;
-        let num_blocks: u32 = num_blocks_usize
-            .try_into()
-            .map_err(|_| Error::InvalidBuffer)?;
-        let end = u64::from(start_block) + u64::from(num_blocks);
-        if end > self.block_count() {
-            return Err(Error::OutOfRange);
-        }
-        self.transfer_blocks(start_block, num_blocks, Transfer::Read(buffer))
+        let num_blocks = self.check_span(start_block, buffer.len())?;
+        self.transfer_blocks(start_block, num_blocks, Transfer::Read(buffer), None)
     }
 
     /// Writes `buffer.len() / 512` consecutive blocks from `buffer`.
@@ -1423,21 +1493,63 @@ impl Emmc {
     /// `buffer` must be a non-zero multiple of [`BLOCK_SIZE`]; otherwise
     /// [`Error::InvalidBuffer`] is returned and no I/O happens.
     pub fn write_blocks(&mut self, start_block: u32, buffer: &[u8]) -> Result<(), Error> {
+        let num_blocks = self.check_span(start_block, buffer.len())?;
+        self.transfer_blocks(start_block, num_blocks, Transfer::Write(buffer), None)
+    }
+
+    /// [`read_blocks`](Self::read_blocks), with the data phase moved by
+    /// `channel`. A buffer that is not word-aligned falls back to
+    /// programmed I/O.
+    pub fn read_blocks_dma(
+        &mut self,
+        channel: &mut dma::Channel,
+        start_block: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), Error> {
+        let num_blocks = self.check_span(start_block, buffer.len())?;
+        self.transfer_blocks(
+            start_block,
+            num_blocks,
+            Transfer::Read(buffer),
+            Some(channel),
+        )
+    }
+
+    /// [`write_blocks`](Self::write_blocks), with the data phase moved by
+    /// `channel`. A buffer that is not word-aligned falls back to
+    /// programmed I/O.
+    pub fn write_blocks_dma(
+        &mut self,
+        channel: &mut dma::Channel,
+        start_block: u32,
+        buffer: &[u8],
+    ) -> Result<(), Error> {
+        let num_blocks = self.check_span(start_block, buffer.len())?;
+        self.transfer_blocks(
+            start_block,
+            num_blocks,
+            Transfer::Write(buffer),
+            Some(channel),
+        )
+    }
+
+    /// Checks a transfer of `len` bytes from `start_block` is whole blocks and
+    /// on the card, and returns its block count.
+    fn check_span(&self, start_block: u32, len: usize) -> Result<u32, Error> {
         if !self.initialised {
             return Err(Error::NotInitialised);
         }
-        if buffer.is_empty() || !buffer.len().is_multiple_of(BLOCK_SIZE) {
+        if len == 0 || !len.is_multiple_of(BLOCK_SIZE) {
             return Err(Error::InvalidBuffer);
         }
-        let num_blocks_usize = buffer.len() / BLOCK_SIZE;
-        let num_blocks: u32 = num_blocks_usize
+        let num_blocks: u32 = (len / BLOCK_SIZE)
             .try_into()
             .map_err(|_| Error::InvalidBuffer)?;
         let end = u64::from(start_block) + u64::from(num_blocks);
         if end > self.block_count() {
             return Err(Error::OutOfRange);
         }
-        self.transfer_blocks(start_block, num_blocks, Transfer::Write(buffer))
+        Ok(num_blocks)
     }
 }
 
@@ -1464,5 +1576,18 @@ impl Transfer<'_> {
     /// Whether this transfer sends data to the card.
     fn is_write(&self) -> bool {
         matches!(self, Self::Write(_))
+    }
+
+    /// The buffer's address and length.
+    fn span(&self) -> (usize, usize) {
+        match self {
+            Self::Read(buffer) => (buffer.as_ptr() as usize, buffer.len()),
+            Self::Write(buffer) => (buffer.as_ptr() as usize, buffer.len()),
+        }
+    }
+
+    /// Whether DMA can move the buffer: the `DATA` register is 32 bits wide.
+    fn is_word_aligned(&self) -> bool {
+        self.span().0.is_multiple_of(4)
     }
 }
