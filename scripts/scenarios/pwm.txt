@@ -1,0 +1,6 @@
+# PWM output as a scope would measure it: 1 kHz at 25 % on channel 1.
+boot peripherals
+expect All peripheral checks passed
+check /machine/soc/peripherals/pwm.ch1-enabled == 1
+check /machine/soc/peripherals/pwm.ch1-period-ns ~ 1000000
+check /machine/soc/peripherals/pwm.ch1-high-ns ~ 250000

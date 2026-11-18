@@ -1,0 +1,16 @@
+# DSI1 video mode: PLL, PHY, HVS channel 2, pixel valve 1, the stream.
+boot dsi-video -device cogware-dsi-panel,id=panel,width=800,height=480
+# Stage 1: the background alone, no image memory.
+expect running  : 800x480
+sleep 300
+check /machine/soc/peripherals/dsi1.frames >= 5
+check /machine/soc/peripherals/dsi1.last-error ==
+set /machine/peripheral/panel.snapshot out/dsi-video-1.ppm
+# Stage 2: a drawn plane, then a flip to the second page.
+expect plane    : Ok
+sleep 300
+set /machine/peripheral/panel.snapshot out/dsi-video-2.ppm
+expect flip     : page two
+sleep 300
+check /machine/soc/peripherals/dsi1.dropped-arm-writes == 0
+set /machine/peripheral/panel.snapshot out/dsi-video-3.ppm

@@ -1,0 +1,18 @@
+# GPIO edges, pulls and bank interrupts, driven from outside.
+boot gpio-events
+# Pull-down on 17 and pull-up on 22 with nothing driving them.
+expect ready: GPIO 17=0 GPIO 22=1
+check /machine/soc/peripherals/gpio.levels == 4194304
+# Ground 22, then raise 17: one rising edge, 22 reads the drive.
+drive 22=0
+drive 17=1
+expect edge 1: GPIO 17=1 GPIO 22=0
+# Let 22 go back to its pull, drop 17: the falling edge.
+drive 22=z
+drive 17=0
+expect edge 2: GPIO 17=0 GPIO 22=1
+# Release 17: its pull-down keeps it low, so no edge.
+drive 17=z
+sleep 100
+drive 17=1
+expect edge 3: GPIO 17=1

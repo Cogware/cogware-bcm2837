@@ -233,6 +233,22 @@ Convert a screendump with `python3 scripts/ppm2png.py card.ppm card.png`.
 
 ---
 
+## 5b. `qemu-scenario.py` — scenario tests against emulated hardware
+
+```sh
+scripts/qemu-scenario.py scripts/scenarios/*.txt
+scripts/qemu-scenario.py --qemu /usr/bin/qemu-system-aarch64 scripts/scenarios/pwm.txt
+```
+
+Boots an example (or any ELF, given as a path relative to the scenario) in
+the cogware QEMU fork, paused until QMP is ready, then runs the scenario's
+steps: `expect` console output, `send` keys, `drive` GPIO pins, `check` and
+`set` QOM properties, `qmp`, `screendump`, `sleep`. Relative output paths are
+taken from the scenario's directory. Exits non-zero on the first failed step,
+after printing the console and QEMU's log. `--qemu` or `COGWARE_QEMU` picks
+the binary; the default is `~/qemu-cogware/build/qemu-system-aarch64`. See
+[30-cogware-qemu.md](30-cogware-qemu.md).
+
 ## 6. `chainboot-qemu` — the hardware loop, emulated
 
 Builds loader and payload, starts QEMU, pushes, captures the payload's output.

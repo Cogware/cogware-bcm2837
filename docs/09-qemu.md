@@ -9,6 +9,9 @@ where QEMU differs from a real Raspberry Pi 3. It complements
 [08-jtag-and-debugging.md](08-jtag-and-debugging.md), and
 [11-videocore-mailbox.md](11-videocore-mailbox.md).
 
+Stock QEMU models only part of the BCM2837; the extended fork and the
+scenario tests that drive it are in [30-cogware-qemu.md](30-cogware-qemu.md).
+
 The setup is Windows-native. The verified emulator is QEMU 11.1.0 from Scoop:
 
 ```text

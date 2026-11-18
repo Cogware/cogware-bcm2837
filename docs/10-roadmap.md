@@ -98,68 +98,53 @@ Repository support files are also in place: `firmware\config.txt` for the Pi
 firmware path, `openocd\rpi3.cfg` for hardware debugging, the complete numbered
 `docs\` set and `README.md`.
 
-## Phase 1: interrupts and local peripherals
+## Phases 1-3: interrupts, the tick and IPIs — done
 
-The next platform milestone is interrupt delivery. The BCM2837 interrupt
-controller is at:
+The SoC interrupt controller, the per-core virtual-timer tick and mailbox IPIs
+are implemented and verified under QEMU on all four cores; see
+[24-interrupts.md](24-interrupts.md). The tick needed no executor change:
+an interrupt wakes the core from `wfe` and the idle loop re-polls hardware
+waiters after every wake-up.
 
-```text
-0x3F00_B200
-```
+Still open from the original plan: interrupt-driven PL011 receive. The console
+is polled at the tick rate, which is enough for a shell; the hooks and the rule
+it must follow are in [07-exceptions-and-irq.md](07-exceptions-and-irq.md).
 
-The PL011 is IRQ 57, which is bit 25 of `pending_2`. Bring this up before any
-executor work; the useful first result is one decoded IRQ entering the existing
-vector table and returning cleanly.
+## Phase 3b: clocks, DMA, PWM, timer, RNG — done
 
-The ARM-local block is at:
+Not originally on the roadmap. The clock manager, the DMA controller (with SPI0
+and EMMC data paths), PWM, the system timer and the hardware RNG are
+implemented; see [25-dma.md](25-dma.md) and
+[26-clocks-pwm-timer-rng.md](26-clocks-pwm-timer-rng.md). Everything QEMU
+emulates is verified there; PWM output and DMA pacing by a peripheral's data
+request need a board.
 
-```text
-0x4000_0000
-```
+## Phase 3e: an emulator that models them — done
 
-It is exposed through `bsp::memory::local` with these concrete hooks:
+A QEMU fork models DMA pacing, SPI DMA and chip select, I2C repeated START,
+GPIO pulls and edges, PWM, both Unicam receivers with an IMX219, the HVS,
+pixel valves, both DSI hosts and two panels; `scripts/qemu-scenario.py`
+drives it. DSI command and video mode, the camera path and GPIO interrupts
+are verified there end to end. See [30-cogware-qemu.md](30-cogware-qemu.md).
+What only a board can show — the D-PHY, PLL lock, analogue settings — still
+needs one.
 
-```text
-timer_irq_control(core)
-mailbox_irq_control(core)
-irq_source(core)
-fiq_source(core)
-mailbox_write_set(core, mbox)
-mailbox_read_clear(core, mbox)
-```
+## Phase 3d: DSI video mode and device interfaces — written, untested
 
-`mailbox_write_set(core, mbox)` is the IPI mechanism for waking another core.
-Start with read-only reporting and masks, then enable one source at a time. The
-first implementation should print enough state to distinguish pending, enabled
-and handled interrupts; a silent interrupt controller is worse than no
-interrupt controller.
+DSI1 video mode through the HVS and pixel valve 1, the `Canvas` drawing
+surface split out of the framebuffer, and the generic device layer (CCI,
+sensor and panel traits, Bayer preview) are in; see
+[28-dsi-video.md](28-dsi-video.md) and [29-devices.md](29-devices.md). The
+Bayer path is verified under QEMU; the rest needs a board. Device tables
+belong in a separate crate.
 
-## Phase 2: interrupt-driven UART RX
+## Phase 3c: camera and display interfaces — written, untested
 
-The console receive path is still polled. Once IRQ dispatch is reliable, make
-PL011 RX interrupt-driven. The existing driver hooks to use are:
-
-```text
-Pl011Uart::enable_rx_interrupts
-Pl011Uart::clear_interrupts
-```
-
-Keep the shell's single-byte semantics at first. A fixed ring buffer is enough,
-and a static one keeps the IRQ path off the heap lock entirely. The hard part
-is not buffering; it is locking. An IRQ handler must not blindly take a
-`SpinLock` already held by the interrupted context on the same core. Either
-mask interrupts across UART critical sections or use a deliberately IRQ-safe
-path.
-
-## Phase 3: per-core timer tick
-
-After IRQ delivery works, add a per-core generic-timer tick. The kernel already
-reads `CNTFRQ_EL0`; keep that rule. QEMU reports 62.5 MHz, while real Pi 3
-firmware programmes 19.2 MHz, so constants are wrong by construction.
-
-The first target should be modest: each core programs its own tick, increments a
-per-core counter, and exposes the counters through the shell. Only then should
-the tick feed timeouts, deferred work, or executor wakeups.
+Both Unicam CSI-2 receivers and both DSI hosts (command mode, low-power) are
+implemented following the Linux drivers; see
+[27-camera-and-display.md](27-camera-and-display.md). QEMU has neither block.
+Next: run both on a Compute Module 3, then DSI high-speed mode (PLLD's DSI
+channel), then decide whether video mode through the HVS is worth its size.
 
 ## Phase 4: CPU upclocking on hardware
 

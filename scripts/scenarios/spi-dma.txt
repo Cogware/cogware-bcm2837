@@ -1,0 +1,4 @@
+# SPI0 by DMA against the emulated flash, paced by the SPI's data requests.
+boot buses -device ds1338,address=0x68,bus=i2c-bus.1 -device tmp105,address=0x49,bus=i2c-bus.1 -device sst25vf016b,bus=spi
+expect JEDEC ID \(0x9F\): \[BF, 25, 41\]
+expect JEDEC ID by DMA \(channels \d+ and \d+\): ok \[BF, 25, 41\]

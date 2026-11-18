@@ -219,3 +219,9 @@ path = "examples/dsi-video.rs"
 test = false
 required-features = ["panic-handler", "allocator"]
 
+# GPIO edge interrupts and pulls, for a jumper or the QEMU scenario runner.
+[[example]]
+name = "gpio-events"
+path = "examples/gpio-events.rs"
+test = false
+required-features = ["panic-handler"]

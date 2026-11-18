@@ -17,12 +17,12 @@
 //!
 //! # What QEMU can and cannot show
 //!
-//! QEMU's BCM2835 GPIO model keeps the output latch and lets `GPLEVn` read it
-//! back, so driving a pin and reading it works and the output checks below are
-//! meaningful. It does **not** model the pull-up/pull-down registers or the
-//! edge detectors, and there is no way to inject an external level, so a
-//! floating input reads back whatever was last driven. Those parts are marked
-//! below.
+//! Stock QEMU's BCM2835 GPIO model keeps the output latch and lets `GPLEVn`
+//! read it back, so the output checks below are meaningful everywhere. It
+//! models no pulls, no edge detection and no external drive, so a floating
+//! input reads whatever was last driven. The cogware QEMU fork models all
+//! three, and the `gpio-events` example with `scripts/qemu-scenario.py`
+//! exercises them; the pull readings below say which model they came from.
 
 #![no_std]
 #![no_main]
@@ -131,11 +131,16 @@ fn open_drain(pin: Pin<SCRATCH, Output>) -> Pin<SCRATCH, OpenDrain> {
     );
 
     pin.release();
+    let high = OpenDrainPin::is_high(&pin);
     println!(
-        "  release          -> reads {} (no pull-up modelled in QEMU, so this",
-        level(OpenDrainPin::is_high(&pin))
+        "  release          -> reads {} ({})",
+        level(high),
+        if high {
+            "the pull-up wins, as on silicon"
+        } else {
+            "the stale latch: stock QEMU models no pulls"
+        }
     );
-    println!("                       is the stale latch, not a real level)");
 
     pin
 }
@@ -228,7 +233,7 @@ fn ownership_notes() {
     println!("    48-53     EMMC / SD card");
 
     println!();
-    println!("-- not modelled by QEMU --");
+    println!("-- not modelled by stock QEMU (the cogware fork models them) --");
     println!("  GPPUD/GPPUDCLK   pull-up and pull-down selection");
     println!("  GPEDS, GPREN...  edge detection, so async pin waits never fire");
     println!("  external drive   nothing can pull a pin from outside");
@@ -239,9 +244,15 @@ fn ownership_notes() {
     let pins = unsafe { Pins::steal() };
     let probe: Pin<5, Input<PullUp>> = pins.p5.into_pull_up_input();
     println!();
+    let high = probe.is_high();
     println!(
-        "  Pin<5, Input<PullUp>> reads {} (meaningless here, correct on silicon)",
-        level(probe.is_high())
+        "  Pin<5, Input<PullUp>> reads {} ({})",
+        level(high),
+        if high {
+            "pulled up"
+        } else {
+            "no pull modelled"
+        }
     );
 }
 

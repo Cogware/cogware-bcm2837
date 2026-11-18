@@ -85,6 +85,15 @@ Boot complete in 17.242192ms. All checks passed.
   feature, so off-the-shelf sensor and display drivers work unmodified.
 - **Mounts FAT16/FAT32 on the SD card** behind an optional, off-by-default
   `embedded-sdmmc` feature, so a kernel can read files by name.
+- Takes **interrupts**: the SoC controller, a per-core timer tick and
+  inter-processor interrupts, with handlers that wake async tasks.
+- Drives the **DMA controller** — memory copies and fills, and paced data paths
+  for SPI0 and the SD card — plus the **clock manager**, **PWM**, the **system
+  timer** and the **hardware RNG**.
+- Has drivers for both **CSI-2 camera receivers** and both **DSI display
+  hosts** (command and video mode), for boards such as the Compute Module 3
+  that bring them out, with generic sensor and panel interfaces for device
+  crates to build on. Written but not yet run on hardware.
 
 Deliberately out of scope: userspace, networking, V3D shaders.
 See [`docs/10-roadmap.md`](docs/10-roadmap.md).
@@ -150,6 +159,13 @@ Every example is a complete, bootable kernel.
 | [`bitbang`](cogware-bcm2837/examples/bitbang.rs) | software SPI and I²C, verified against simulated devices |
 | [`buses`](cogware-bcm2837/examples/buses.rs) | hardware SPI0 and BSC1 against emulated chips, on four cores |
 | [`async-bus`](cogware-bcm2837/examples/async-bus.rs) | `embedded-hal-async` buses, delays and pin waits on the executors |
+| [`peripherals`](cogware-bcm2837/examples/peripherals.rs) | clock manager, system timer, RNG, DMA copy/fill and PWM, each checked |
+| [`interrupts`](cogware-bcm2837/examples/interrupts.rs) | per-core ticks, IPIs, a timer match and a DMA completion waking a task |
+| [`camera`](cogware-bcm2837/examples/camera.rs) | a CSI-2 receiver capturing one frame (board and sensor needed) |
+| [`dsi-panel`](cogware-bcm2837/examples/dsi-panel.rs) | a DSI panel in command mode: DCS bring-up and colour bars (board needed) |
+| [`gpio-events`](cogware-bcm2837/examples/gpio-events.rs) | GPIO edge interrupts and pulls, driven from outside |
+| [`dsi-video`](cogware-bcm2837/examples/dsi-video.rs) | DSI video mode: background, a drawn plane, a page flip (board needed) |
+| [`camera-preview`](cogware-bcm2837/examples/camera-preview.rs) | a sensor frame on HDMI via the Bayer preview; a synthetic frame in QEMU |
 | [`shell`](cogware-bcm2837/examples/shell/main.rs) | all of the above, interactively — the reference kernel |
 | [`chainloader`](cogware-bcm2837/examples/chainloader.rs) | receives a kernel over serial and boots it, so the card stays put |
 
@@ -387,6 +403,13 @@ docs/              design notes
 | [`docs/21-host-setup.md`](docs/21-host-setup.md) | installing the toolchain on Linux and Windows, SD cards, cables, probes |
 | [`docs/22-chainloading.md`](docs/22-chainloading.md) | pushing kernels over serial instead of reflashing the card |
 | [`docs/23-scripts.md`](docs/23-scripts.md) | every host script, Windows and Linux, option by option |
+| [`docs/24-interrupts.md`](docs/24-interrupts.md) | the interrupt controller, the tick, IPIs, why handlers take no lock |
+| [`docs/25-dma.md`](docs/25-dma.md) | DMA channels, coherency, paced transfers, what QEMU cannot show |
+| [`docs/26-clocks-pwm-timer-rng.md`](docs/26-clocks-pwm-timer-rng.md) | the clock manager, PWM, the system timer and the RNG |
+| [`docs/27-camera-and-display.md`](docs/27-camera-and-display.md) | Unicam CSI-2 and DSI command mode, the DSI1 erratum, Compute Module notes |
+| [`docs/28-dsi-video.md`](docs/28-dsi-video.md) | DSI video mode: HVS, pixel valve, the integer PLL, sharing with the firmware |
+| [`docs/29-devices.md`](docs/29-devices.md) | sensor and panel interfaces, and why device tables live in another crate |
+| [`docs/30-cogware-qemu.md`](docs/30-cogware-qemu.md) | the extended QEMU fork and scenario tests that drive its hardware |
 
 Before touching anything that runs before the MMU is enabled, read
 [`docs/13-heap.md`](docs/13-heap.md) and
@@ -413,7 +436,9 @@ Also verified under QEMU `raspi3b`: SD block writes, source-level debugging over
 the GDB stub, and the crate consumed as a dependency from an unrelated
 workspace.
 
-Still unverified on silicon: physical JTAG with a probe attached, EMMC writes —
+Still unverified on silicon: the interrupt controller, DMA, PWM, the camera
+receivers and the DSI hosts (all but the last two verified under QEMU where it
+emulates them), physical JTAG with a probe attached, EMMC writes —
 the boot card is not expendable — and `CPUECTLR_EL1.SMPEN`, which sits on the
 EL3-only path that Pi firmware never takes. Each is marked as such in the source
 and in the docs.

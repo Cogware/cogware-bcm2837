@@ -1,0 +1,11 @@
+# A DCS panel in command mode on DSI1: bring-up, a power-mode read, colour bars
+# written into the panel's own frame memory. Every DSI1 register write must
+# arrive by DMA; an ARM write would be dropped.
+boot dsi-panel -device cogware-dsi-panel,id=panel,width=240,height=320
+expect init     : ok
+expect panel    : on
+expect power    : 0x9c
+expect bars     : drawn
+check /machine/soc/peripherals/dsi1.dropped-arm-writes == 0
+check /machine/soc/peripherals/dsi1.last-error == 
+set /machine/peripheral/panel.snapshot out/dsi-panel.ppm
